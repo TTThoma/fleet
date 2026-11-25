@@ -543,6 +543,8 @@ func (h *Home) traceDialogName() string {
 		return "allowed_accounts"
 	case h.snoozeDialog.IsVisible():
 		return "snooze"
+	case h.tagDialog.IsVisible():
+		return "tag_dialog"
 	case h.contextMenu.IsVisible():
 		return "context_menu"
 	case h.sessionCreateDialog.IsVisible():

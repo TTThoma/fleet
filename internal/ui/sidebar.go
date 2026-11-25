@@ -202,7 +202,7 @@ func BuildFlatItems(
 			if lowerFilter != "" {
 				var filtered []*session.Session
 				for _, s := range coSessions {
-					if strings.Contains(strings.ToLower(s.Title), lowerFilter) {
+					if sessionMatchesFilter(s, lowerFilter) {
 						filtered = append(filtered, s)
 					}
 				}
@@ -693,6 +693,21 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 		slotRaw = fmt.Sprintf(" [%d]", slot)
 	}
 
+	// Team tags: a role glyph after the agent glyph (orchestrator/concierge
+	// only — workers are the common case and stay unmarked) and a dim
+	// " · specialty" after the title. Both absent on an untagged row, which
+	// therefore renders byte-identical to before tags existed.
+	tags := s.GetTags()
+	roleRaw := roleGlyph(tags.Role)
+	roleSel := ""
+	if roleRaw != "" {
+		roleSel = roleRaw + " "
+	}
+	specRaw := ""
+	if tags.Specialty != "" {
+		specRaw = " · " + tags.Specialty
+	}
+
 	// Reserve: leading indent + status symbol + selection padding + slot, plus
 	// the agent glyph and its trailing space when it's shown (2 cells).
 	reserve := 13
@@ -712,7 +727,9 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	if !selected {
 		snoozeCost = ansi.StringWidth(snoozeRaw)
 	}
-	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost
+	// The role glyph and specialty come out of the title's budget like the slot
+	// badge — present on only some rows. Measured in cells: both are multi-byte.
+	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost - ansi.StringWidth(roleSel) - ansi.StringWidth(specRaw)
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
@@ -732,7 +749,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	// glyph used for collapsed headers). Bg fill spans symbol + agent glyph +
 	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
-		row := " " + symbolRaw + " " + glyphSel + title + slotRaw + " "
+		row := " " + symbolRaw + " " + glyphSel + roleSel + title + specRaw + slotRaw + " "
 		rendered := fmt.Sprintf("   %s", selTitle().Render(row))
 		// On the focused row, spell out the affordance. Exactly one note fits
 		// before the row overflows, so these are mutually exclusive: suspended
@@ -768,11 +785,46 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	if snoozeRaw != "" {
 		styledSnooze = DimStyle.Render(snoozeRaw)
 	}
+	styledRole := ""
+	if roleSel != "" {
+		// Monochrome like the agent glyph: identity by shape, colour stays the
+		// status dot's.
+		styledRole = AgentGlyphStyle.Render(roleRaw) + " "
+	}
+	styledSpec := ""
+	if specRaw != "" {
+		styledSpec = DimStyle.Render(specRaw)
+	}
 	if glyphRaw != "" {
 		styledGlyph := AgentGlyphStyle.Render(glyphRaw)
-		return fmt.Sprintf("    %s %s %s%s%s", styledSymbol, styledGlyph, styledTitle, styledSlot, styledSnooze)
+		return fmt.Sprintf("    %s %s %s%s%s%s%s", styledSymbol, styledGlyph, styledRole, styledTitle, styledSpec, styledSlot, styledSnooze)
 	}
-	return fmt.Sprintf("    %s %s%s%s", styledSymbol, styledTitle, styledSlot, styledSnooze)
+	return fmt.Sprintf("    %s %s%s%s%s%s", styledSymbol, styledRole, styledTitle, styledSpec, styledSlot, styledSnooze)
+}
+
+// Role glyphs mark the two roles a team has one of. Same rules as the agent
+// glyphs: width-1, East-Asian-Neutral, dim and monochrome. Workers get none:
+// they are most of a team, and their specialty suffix already says what they do.
+//
+// Neither may be an emoji-capable codepoint. ♦ (U+2666) was the first pick and
+// is one (Emoji=Yes, text by default): a terminal falling back to a colour
+// emoji font can draw it red and two cells wide, which no width table sees.
+// ❖ is Dingbats, ⚑ Misc Symbols, and neither is in the emoji set.
+const (
+	orchestratorGlyph = "❖" // U+2756 — the one that directs
+	conciergeGlyph    = "⚑" // U+2691 — the one that flags things for you
+)
+
+// roleGlyph returns the sidebar glyph for a role, "" for none.
+func roleGlyph(r session.Role) string {
+	switch r {
+	case session.RoleOrchestrator:
+		return orchestratorGlyph
+	case session.RoleConcierge:
+		return conciergeGlyph
+	default:
+		return ""
+	}
 }
 
 // Agent glyphs mark which coding agent a session runs — a quiet, dim,
@@ -1042,4 +1094,16 @@ func FirstSessionItem(items []SidebarItem) int {
 		}
 	}
 	return -1
+}
+
+// sessionMatchesFilter reports whether a session matches the sidebar's `/`
+// filter (already lowercased): its title, or its task or specialty tag — so
+// typing a task name shows that team until the sidebar can group by task.
+func sessionMatchesFilter(s *session.Session, lowerFilter string) bool {
+	if strings.Contains(strings.ToLower(s.Title), lowerFilter) {
+		return true
+	}
+	t := s.GetTags()
+	return (t.Task != "" && strings.Contains(t.Task, lowerFilter)) ||
+		(t.Specialty != "" && strings.Contains(strings.ToLower(t.Specialty), lowerFilter))
 }
