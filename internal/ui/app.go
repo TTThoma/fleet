@@ -137,6 +137,7 @@ type (
 	sessionCreateResultMsg     struct {
 		session *session.Session
 		err     error
+		askTask bool // see sessionCreateMsg.askTask
 	}
 	previewMsg struct {
 		sessionID string
@@ -1260,6 +1261,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
 		s.Agent = ag
+		s.Role, s.Specialty, s.Task = msg.tags.Role, msg.tags.Specialty, msg.tags.Task
 		// Inherit rather than re-pick: the fork resumes the parent's
 		// conversation, so it has to authenticate as the account that
 		// conversation belongs to. A fork whose account was chosen afresh would
@@ -1817,11 +1819,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			path:          msg.info.Path,
 			title:         msg.info.Name,
 			workspaceName: msg.info.Name,
+			tags:          msg.tags,
 		})
 
 	case showCreateWorkspaceMsg:
 		h.worktreeDialog.Hide()
 		h.createWorkspaceDialog.Show(msg.provider, msg.repoPath)
+		h.createWorkspaceDialog.inherit = h.worktreeDialog.inherit
 		return h, nil
 
 	case showWorktreeDialogMsg:
@@ -1876,6 +1880,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		baseBranch := msg.baseBranch
 		copyClaudeSettings := h.cfg.IsCopyClaudeSettingsEnabled() && !provider.IsCustom()
 		tkt := msg.ticket
+		tags := msg.tags
 		moveState := h.cfg.IsTicketStartStateEnabled()
 		tracker := ""
 		if tkt != nil {
@@ -1922,7 +1927,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return workspaceCreateResultMsg{
 				info: info, err: err, pendingID: pendingID, repoPath: repoPath,
-				ticket: tres, ticketErr: terr, ticketTracker: tracker,
+				ticket: tres, ticketErr: terr, ticketTracker: tracker, tags: tags,
 			}
 		}, spinnerTickCmd)
 
@@ -1977,6 +1982,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			title:         msg.info.Name,
 			workspaceName: msg.info.Name,
 			prompt:        prompt,
+			tags:          msg.tags,
 		})
 
 	case paletteTicketsMsg:
@@ -3425,7 +3431,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			h.newDialog.Show()
 			return h, nil
 		}
-		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()), h.sessionCreateAccountRows(repoPath))
+		h.openSessionCreateDialog(repoPath)
 		return h, nil
 	case "n":
 		// New session at any repo path.
@@ -3438,6 +3444,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			h.setInfo("no repo selected")
 			return h, nil
 		}
+		h.worktreeDialog.SetInherit(h.worktreeInheritTags())
 		h.worktreeDialog.ShowLoading()
 		return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 	case "f":
@@ -4423,6 +4430,8 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	s.WorkspaceName = msg.workspaceName
 	s.Agent = msg.agent
 	s.Account = msg.account
+	s.Role, s.Specialty, s.Task = msg.tags.Role, msg.tags.Specialty, msg.tags.Task
+	askTask := msg.askTask
 	if msg.resumeClaudeID != "" {
 		s.ClaudeSessionID = msg.resumeClaudeID
 	}
@@ -4436,7 +4445,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 			analytics.Track(analytics.EventTmuxCommandFailure, map[string]interface{}{"command": "new_session"})
 			return sessionCreateResultMsg{err: err}
 		}
-		return sessionCreateResultMsg{session: s}
+		return sessionCreateResultMsg{session: s, askTask: askTask}
 	}
 }
 
@@ -4536,6 +4545,15 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 			h.syncViewport()
 			break
 		}
+	}
+
+	// "new task…" in the `A` dialog: the session exists and is selected, so
+	// ask for the name now. Skipped if another dialog took the screen while the
+	// session was starting — the user can still press T.
+	if msg.askTask && !h.modalOpen() {
+		h.contextMenuTarget = h.targetForCursor()
+		h.tagDialog.SetAnchor(h.contextMenuAnchor())
+		h.tagDialog.ShowFocusingTask("Name the task for "+s.Title, s.GetTags(), tasksInUse(h.sessions))
 	}
 
 	// Probe for a TCC-blocked folder now that Start() has spun up the tmux server
@@ -6016,6 +6034,7 @@ func (h *Home) forkSelected() tea.Cmd {
 	workspaceName := s.WorkspaceName
 	parentAgent := s.Agent
 	parentAccount := s.Account
+	parentTags := s.GetTags()
 	return func() tea.Msg {
 		// Off the Update loop: ResolveLaunchID may read transcripts.
 		claudeSessionID, stale := s.ResolveLaunchID()
@@ -6031,6 +6050,7 @@ func (h *Home) forkSelected() tea.Cmd {
 			agent:                 parentAgent,
 			account:               parentAccount,
 			accountSet:            true,
+			tags:                  parentTags,
 		}
 	}
 }
@@ -6075,6 +6095,7 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 	// something that doesn't hold that conversation.
 	parentAgent := parent.Agent
 	parentAccount := parent.Account
+	parentTags := parent.GetTags()
 	return func() tea.Msg {
 		// Off the Update loop: ResolveLaunchID may read transcripts.
 		parentClaudeSessionID, stale := parent.ResolveLaunchID()
@@ -6090,6 +6111,7 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 			agent:                 parentAgent,
 			account:               parentAccount,
 			accountSet:            true,
+			tags:                  parentTags,
 		}
 	}
 }
@@ -6132,6 +6154,8 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 		parentProjectPath: s.ProjectPath,
 		parentTitle:       s.Title,
 	}
+	// A fork copies its parent's tags (forkSessionMsg.tags); say so up front.
+	h.worktreeDialog.SetInherit(s.GetTags())
 	h.worktreeDialog.ShowLoading()
 	return tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 }
@@ -9925,7 +9949,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 			h.newDialog.Show()
 			return h, nil
 		}
-		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()), h.sessionCreateAccountRows(repoPath))
+		h.openSessionCreateDialog(repoPath)
 		return h, nil
 	case "manage_accounts":
 		return h, h.openAccountsDialog()
@@ -9964,6 +9988,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 			h.setInfo("no repo selected")
 			return h, nil
 		}
+		h.worktreeDialog.SetInherit(h.worktreeInheritTags())
 		h.worktreeDialog.ShowLoading()
 		return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 	case "fork":

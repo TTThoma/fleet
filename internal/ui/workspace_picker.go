@@ -37,6 +37,7 @@ type (
 	}
 	workspaceSelectedMsg struct {
 		info workspace.WorkspaceInfo
+		tags session.Tags // WorktreeDialog.inherit
 	}
 	showCreateWorkspaceMsg struct {
 		provider workspace.Provider
@@ -70,8 +71,14 @@ const ticketMaxRows = 5
 // field IS the literal option, so there is never a "use what I typed" row and
 // never two things claiming the Enter key.
 type WorktreeDialog struct {
-	visible         bool
-	width, height   int
+	visible       bool
+	width, height int
+	// inherit is the team tags the new session will carry, set by whoever
+	// opened the dialog (worktreeInheritTags, or a fork's parent). Carried on
+	// the messages this dialog emits rather than parked on Home, so a second
+	// `w` while a worktree is still being created can't hand its tags to the
+	// first. Shown on one line under the title; zero shows nothing.
+	inherit         session.Tags
 	baseBranchInput textinput.Model
 	newBranchInput  textinput.Model
 	workspaces      []workspace.WorkspaceInfo
@@ -429,7 +436,8 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 			// Select existing worktree.
 			info := d.workspaces[d.cursor]
 			d.Hide()
-			return d, func() tea.Msg { return workspaceSelectedMsg{info: info} }
+			tags := d.inherit
+			return d, func() tea.Msg { return workspaceSelectedMsg{info: info, tags: tags} }
 		}
 		// Enter on a highlighted branch fills the Base field; it does NOT
 		// create, for the same reason a ticket row doesn't — the other field is
@@ -463,11 +471,12 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 		repoPath := d.repoPath
 		// Capture before Hide, which clears the resolution.
 		ticket := d.ticketForCurrentInput()
+		tags := d.inherit
 		d.Hide()
 		return d, func() tea.Msg {
 			return workspaceCreateMsg{
 				name: name, branch: newBranch, baseBranch: baseBranch,
-				repoPath: repoPath, provider: provider, ticket: ticket,
+				repoPath: repoPath, provider: provider, ticket: ticket, tags: tags,
 			}
 		}
 	}
@@ -537,6 +546,10 @@ func (d *WorktreeDialog) View() string {
 	}
 	b.WriteString(TitleStyle.Render(title))
 	b.WriteString("\n\n")
+	if label := teamLabel(d.inherit); label != "" {
+		b.WriteString(DimStyle.Render(ansi.Truncate("joins as "+label+"  (T to change later)", d.innerWidth(), "…")))
+		b.WriteString("\n\n")
+	}
 
 	if d.loading {
 		spinner := spinnerFrames[d.frame%len(spinnerFrames)]
@@ -770,3 +783,7 @@ func (d *WorktreeDialog) wrapDialog(content string) string {
 	box := DialogStyle.Width(dialogWidth).Render(content)
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, box)
 }
+
+// SetInherit sets the team tags the dialog's new session will carry. Every
+// opener calls it, zero included, so tags from one `w` never leak into the next.
+func (d *WorktreeDialog) SetInherit(t session.Tags) { d.inherit = t }

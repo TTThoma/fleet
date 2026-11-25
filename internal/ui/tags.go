@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"path/filepath"
 	"sort"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/session"
 )
@@ -185,4 +187,34 @@ func (h *Home) setTagsSelected(t session.Tags) {
 	} else {
 		h.setInfo("Tagged " + teamLabel(t))
 	}
+}
+
+// openSessionCreateDialog opens the `A` dialog for repoPath, with its Task row
+// defaulting to the task of the session under the cursor (and Role to worker),
+// so adding a session next to a team member joins that team unless changed.
+// Shared by `A` and the palette, so the two can't drift.
+func (h *Home) openSessionCreateDialog(repoPath string) {
+	fromTask := ""
+	if s := h.selectedSession(); s != nil {
+		fromTask = s.GetTags().Task
+	}
+	h.sessionCreateDialog.ShowTagged(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()),
+		h.sessionCreateAccountRows(repoPath), tasksInUse(h.sessions), fromTask)
+}
+
+// worktreeInheritTags is what a new worktree session started with `w` from the
+// cursor's row joins as: that session's task, as a worker. The specialty is
+// deliberately not copied — an orchestrator's "infra" says nothing about what
+// the worker it spawns will do. Zero when the row is not a session or has no
+// task, which is the long-standing untagged behaviour.
+func (h *Home) worktreeInheritTags() session.Tags {
+	s := h.selectedSession()
+	if s == nil {
+		return session.Tags{}
+	}
+	task := s.GetTags().Task
+	if task == "" {
+		return session.Tags{}
+	}
+	return session.Tags{Role: session.RoleWorker, Task: task}
 }

@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -29,6 +30,15 @@ type SessionCreateDialog struct {
 	accounts   []accountPickerRow
 	accountIdx int
 	focus      sessionCreateFocus
+
+	// Team tags. roleIdx indexes tagRoleCycle; taskIdx indexes taskOptions(),
+	// whose head is "no task" and whose tail is "new task…" — picking that one
+	// creates the session and then opens the tag dialog on it to name the task,
+	// since this dialog holds no text input (it stays in routeToModal's
+	// normalized set, so h/j/k/l keep working under any keyboard layout).
+	roleIdx int
+	taskIdx int
+	tasks   []string
 }
 
 // sessionCreateFocus names the row ←→ acts on. The dialog is a stack of
@@ -39,7 +49,13 @@ type sessionCreateFocus int
 const (
 	focusCreateAgent sessionCreateFocus = iota
 	focusCreateAccount
+	focusCreateRole
+	focusCreateTask
 )
+
+// createNewTaskLabel is the Task cycler's last option. ASCII "+", not the
+// fullwidth ＋, which is two cells wide.
+const createNewTaskLabel = "+ new task…"
 
 // NewSessionCreateDialog creates the dialog.
 func NewSessionCreateDialog() *SessionCreateDialog {
@@ -52,6 +68,15 @@ func NewSessionCreateDialog() *SessionCreateDialog {
 // the dialog never consults the account store itself, so it is a pure function
 // of what it was handed and can be tested without one.
 func (d *SessionCreateDialog) Show(repoPath, title string, defaultAgent agent.Type, accounts []accountPickerRow) {
+	d.ShowTagged(repoPath, title, defaultAgent, accounts, nil, "")
+}
+
+// ShowTagged opens the dialog with the team rows seeded: tasks are the tasks in
+// use (tasksInUse), and fromTask is the task of the row it was opened over.
+// When that row has a task, the new session defaults to joining it as a
+// worker — the session you most often add next to a team member — and the
+// rows say so before anything is created. Otherwise both rows start on none.
+func (d *SessionCreateDialog) ShowTagged(repoPath, title string, defaultAgent agent.Type, accounts []accountPickerRow, tasks []string, fromTask string) {
 	d.visible = true
 	d.repoPath = repoPath
 	d.title = title
@@ -59,6 +84,43 @@ func (d *SessionCreateDialog) Show(repoPath, title string, defaultAgent agent.Ty
 	d.accounts = accounts
 	d.accountIdx = 0
 	d.focus = focusCreateAgent
+	d.tasks = tasks
+	d.roleIdx, d.taskIdx = 0, 0
+	for i, t := range d.taskOptions() {
+		if fromTask != "" && t == fromTask {
+			d.taskIdx = i
+			d.roleIdx = slices.Index(tagRoleCycle, session.RoleWorker)
+		}
+	}
+}
+
+// taskOptions is the Task cycler: "" (no task), the tasks in use, then the
+// new-task sentinel (also "", told apart by its index — see wantsNewTask).
+func (d *SessionCreateDialog) taskOptions() []string {
+	return append(append([]string{""}, d.tasks...), "")
+}
+
+func (d *SessionCreateDialog) wantsNewTask() bool { return d.taskIdx == len(d.taskOptions())-1 }
+
+func (d *SessionCreateDialog) taskLabel() string {
+	switch {
+	case d.wantsNewTask():
+		return createNewTaskLabel
+	case d.taskIdx == 0:
+		return "none"
+	default:
+		return d.taskOptions()[d.taskIdx]
+	}
+}
+
+// tags is what ⏎ creates the session with. A new task has no name yet; the
+// tag dialog that opens next supplies it.
+func (d *SessionCreateDialog) tags() session.Tags {
+	t := session.Tags{Role: tagRoleCycle[d.roleIdx]}
+	if !d.wantsNewTask() {
+		t.Task = d.taskOptions()[d.taskIdx]
+	}
+	return t
 }
 
 func (d *SessionCreateDialog) Hide()           { d.visible = false }
@@ -145,50 +207,57 @@ func (d *SessionCreateDialog) Update(msg tea.Msg) (*SessionCreateDialog, tea.Cmd
 			return d, nil
 		}
 		path, title, ag, acct := d.repoPath, d.title, d.agent, d.account()
+		tags, askTask := d.tags(), d.wantsNewTask()
 		d.Hide()
 		return d, func() tea.Msg {
-			return sessionCreateMsg{path: path, title: title, agent: ag, account: acct}
+			return sessionCreateMsg{path: path, title: title, agent: ag, account: acct, tags: tags, askTask: askTask}
 		}
 	}
 	return d, nil
 }
 
-// tab advances to the next thing the user can change: the next row when there
-// are two, and the Agent row's own value when the Account row is absent.
-//
-// That second half is not a flourish. On master `tab` was bound to
-// cycleAgent(1), and routing it straight to moveFocus made it do nothing at all
-// for everyone with fewer than two accounts — the majority — with no footer
-// hint to signal the key had changed meaning. ↑↓/j/k are pure row navigation
-// and stay inert there instead, which regresses nothing: they were never bound.
-func (d *SessionCreateDialog) tab(delta int) {
-	if !d.accountRowActive() {
-		d.cycleAgent(delta)
-		return
+// tab moves to the next row, the idiom every other multi-field dialog here
+// uses. (On master, with no Account row, tab cycled the agent — the only
+// cycler on screen. The Role and Task rows mean there is always another row
+// now, so tab moving to it is visible rather than the dead key that rule
+// existed to avoid.)
+func (d *SessionCreateDialog) tab(delta int) { d.moveFocus(delta) }
+
+// rows are the rows the highlight can stand on, in order: an inert Account row
+// (no accounts, or a non-Claude agent) is skipped rather than parked on, where
+// ←→ would do nothing.
+func (d *SessionCreateDialog) rows() []sessionCreateFocus {
+	r := []sessionCreateFocus{focusCreateAgent}
+	if d.accountRowActive() {
+		r = append(r, focusCreateAccount)
 	}
-	d.moveFocus(delta)
+	return append(r, focusCreateRole, focusCreateTask)
 }
 
-// moveFocus walks between the rows that can actually be changed. With no
-// account cycle, or on a non-Claude agent, the Agent row is the only one and
-// this is a no-op rather than a highlight parked somewhere ←→ does nothing.
+// moveFocus walks the rows that can be changed, wrapping.
 func (d *SessionCreateDialog) moveFocus(delta int) {
-	if !d.accountRowActive() {
-		d.focus = focusCreateAgent
-		return
+	rows := d.rows()
+	cur := slices.Index(rows, d.focus)
+	if cur < 0 {
+		cur = 0
 	}
-	const rows = 2
-	d.focus = sessionCreateFocus(((int(d.focus)+delta)%rows + rows) % rows)
+	n := len(rows)
+	d.focus = rows[((cur+delta)%n+n)%n]
 }
 
 // cycle advances the focused row's value by delta (+1 next, -1 prev), wrapping.
 func (d *SessionCreateDialog) cycle(delta int) {
-	if d.focus == focusCreateAccount && d.accountRowActive() {
-		n := len(d.accounts)
-		d.accountIdx = ((d.accountIdx+delta)%n + n) % n
-		return
+	wrap := func(i, n int) int { return ((i+delta)%n + n) % n }
+	switch {
+	case d.focus == focusCreateAccount && d.accountRowActive():
+		d.accountIdx = wrap(d.accountIdx, len(d.accounts))
+	case d.focus == focusCreateRole:
+		d.roleIdx = wrap(d.roleIdx, len(tagRoleCycle))
+	case d.focus == focusCreateTask:
+		d.taskIdx = wrap(d.taskIdx, len(d.taskOptions()))
+	default:
+		d.cycleAgent(delta)
 	}
-	d.cycleAgent(delta)
 }
 
 // agentCycle is the order the picker steps through (left/right); the create
@@ -209,7 +278,7 @@ func (d *SessionCreateDialog) cycleAgent(delta int) {
 	// The Account row goes inert on a non-Claude agent, so the highlight must
 	// not stay parked on it — ←→ would silently do nothing. The selection
 	// itself is kept: cycling back to Claude restores the chosen account.
-	if !d.accountRowActive() {
+	if d.focus == focusCreateAccount && !d.accountRowActive() {
 		d.focus = focusCreateAgent
 	}
 }
@@ -228,11 +297,13 @@ const (
 	// is dropped when the Agent row is the only one that can be changed, since a
 	// footer advertising a key that does nothing is the dead-key the context
 	// menu's dimmed rows exist to avoid.
-	sessionCreateFooter     = "↑↓ field   ←→ change   ⏎ create   esc cancel"
-	sessionCreateFooterOnly = "←→ change   ⏎ create   esc cancel"
+	sessionCreateFooter = "↑↓ field   ←→ change   ⏎ create   esc cancel"
+	// sessionCreateFooterNewTask says what ⏎ does when the Task row holds "new
+	// task…": it creates, and then asks for the name.
+	sessionCreateFooterNewTask = "↑↓ field   ←→ change   ⏎ create, then name task"
 	// sessionCreateLabelW is the label column, sized to the longer of the two
 	// labels so both rows' arrows start in the same place.
-	sessionCreateLabelW = len("Account")
+	sessionCreateLabelW = len("Account") // the longest label ("Role", "Task" fit)
 	// The pieces a cycler row spends outside its value cell. Named so the budget
 	// in accountValue and the line built in renderRow measure the same thing.
 	sessionCreateGap   = "   " // between the label and the lead arrow
@@ -275,6 +346,14 @@ func (d *SessionCreateDialog) View() string {
 		b.WriteString(d.renderRow("Account", d.accountValue(inner), inner,
 			d.focus == focusCreateAccount, d.accountRowActive()))
 	}
+	roleName := string(tagRoleCycle[d.roleIdx])
+	if roleName == "" {
+		roleName = "none"
+	}
+	b.WriteString("\n")
+	b.WriteString(d.renderRow("Role", roleName, inner, d.focus == focusCreateRole, true))
+	b.WriteString("\n")
+	b.WriteString(d.renderRow("Task", ansi.Truncate(d.taskLabel(), max(inner-sessionCreateRowChrome, 1), "…"), inner, d.focus == focusCreateTask, true))
 
 	b.WriteString("\n\n")
 	b.WriteString(lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", min(34, inner))))
@@ -305,10 +384,10 @@ func (d *SessionCreateDialog) footer() string {
 		}
 		return blocker + " — ↓ then ←→ pick another"
 	}
-	if d.accountRowActive() {
-		return sessionCreateFooter
+	if d.wantsNewTask() {
+		return sessionCreateFooterNewTask
 	}
-	return sessionCreateFooterOnly
+	return sessionCreateFooter
 }
 
 // accountValue lays the highlighted account's name and state across the value
