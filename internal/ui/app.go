@@ -307,7 +307,9 @@ type Home struct {
 	allowedAccounts       *AllowedAccountsDialog
 	// The row the open context menu was built for. Its entries resolve their
 	// subject from h.cursor, which an async rebuild can move — see contextMenuTarget.
-	contextMenuTarget   contextMenuTarget
+	contextMenuTarget contextMenuTarget
+	// settingsCursor is the cursor's row when Settings opened, restored on close.
+	settingsCursor      contextMenuTarget
 	sessionCreateDialog *SessionCreateDialog
 	consentDialog       *ConsentDialog
 	onboardingDialog    *OnboardingDialog
@@ -1598,7 +1600,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Display toggles are live, but the density and group-by flags change
 		// BuildFlatItems output, so rebuild the flattened list — keeping the
 		// cursor on its row, since regrouping moves every row.
-		h.rebuildKeepingCursor()
+		//
+		// The row is the one under the cursor when Settings OPENED: the Group by
+		// cycler flips the view live, and a tick rebuild while the dialog is up
+		// would leave the cursor's index pointing into the other view.
+		h.restoreCursorTo(h.settingsCursor)
 		return h, nil
 
 	case onboardingClosedMsg:
@@ -3607,6 +3613,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		analytics.Track(analytics.EventCommandPalette, nil)
 		return h, h.maybeLoadPaletteTickets()
 	case "S":
+		h.settingsCursor = h.targetForCursor() // see settingsClosedMsg
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil
@@ -6531,8 +6538,9 @@ func (h *Home) jumpToNextAttentionPR() {
 			case it.TaskKey != "" && it.Session != nil:
 				// By-task view: a member row carries its checkout's badge, so it
 				// is a candidate in place of the header that isn't drawn. Only
-				// the first of a run sharing a checkout, so one press is one PR.
-				if it.Snooze.Muted || (i > 0 && h.flatItems[i-1].Session != nil && h.flatItems[i-1].RepoPath == it.RepoPath) {
+				// the first unmuted row of a run sharing a checkout, so one press
+				// is one PR — and a muted first member doesn't hide the rest.
+				if it.Snooze.Muted || h.earlierInCheckoutRun(i) {
 					continue
 				}
 			default:
@@ -9098,6 +9106,23 @@ func (h *Home) revealCheckout(repo string) {
 	h.repoExpanded[repo] = true
 }
 
+// earlierInCheckoutRun reports whether a row above i, in the unbroken run of
+// session rows sharing i's checkout, is unmuted — i.e. already the P-jump's
+// candidate for that checkout.
+func (h *Home) earlierInCheckoutRun(i int) bool {
+	repo := h.flatItems[i].RepoPath
+	for j := i - 1; j >= 0; j-- {
+		prev := h.flatItems[j]
+		if prev.Session == nil || prev.RepoPath != repo {
+			return false
+		}
+		if !prev.Snooze.Muted {
+			return true
+		}
+	}
+	return false
+}
+
 // revealSession expands every group that could hide s: its origin and
 // checkout, and its task, which is where the by-task view draws it.
 // Transient, like revealCheckout (the map, not the stored collapse).
@@ -10136,6 +10161,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		analytics.Track(analytics.EventFilterUsed, nil)
 		return h, nil
 	case "settings":
+		h.settingsCursor = h.targetForCursor() // see settingsClosedMsg
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil

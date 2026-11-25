@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/brizzai/fleet/internal/git"
+	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -345,5 +347,65 @@ func TestTaskHeaderRendersTheTask(t *testing.T) {
 	lines := renderPlain(h)
 	if !strings.Contains(lines[0], "@auth 1") {
 		t.Errorf("first row = %q, want the @auth header with its count", lines[0])
+	}
+}
+
+func TestTaskRowCarriesBranchDirtyAndPR(t *testing.T) {
+	s := tagged("Fix login", "/tmp/fleet-x", session.RoleWorker, "auth")
+	info := &git.RepoInfo{Branch: "feat/sidebar-by-task", IsDirty: true, PR: &github.PR{Number: 7, State: "OPEN", CIStatus: "FAILURE"}}
+	item := SidebarItem{Session: s, TaskKey: "auth", OriginKey: "github.com/acme/fleet", RepoPath: "/tmp/fleet-x", taskRepo: info}
+	for _, sel := range []bool{false, true} {
+		row := ansi.Strip(renderSessionItem(item, 70, sel, -1))
+		if !strings.Contains(row, "fleet/sidebar-by-task*") || !strings.Contains(row, "#7") {
+			t.Errorf("selected=%v: wide row missing branch/dirty/PR: %q", sel, row)
+		}
+		if w := ansi.StringWidth(row); w > 72 {
+			t.Errorf("selected=%v: row %d wide at 70", sel, w)
+		}
+	}
+	// Narrower: the badge goes before the label does.
+	row := ansi.Strip(renderSessionItem(item, 50, false, -1))
+	if strings.Contains(row, "#7") || !strings.Contains(row, "fleet/sidebar-by-task") {
+		t.Errorf("at 50 the PR badge should drop first: %q", row)
+	}
+}
+
+func TestPRJumpInTaskView(t *testing.T) {
+	byTask(t)
+	red := &github.PR{Number: 2, State: "OPEN", CIStatus: "FAILURE"}
+	a1 := tagged("a1", "/tmp/pt-red", session.RoleWorker, "auth")
+	a2 := tagged("a2", "/tmp/pt-red", session.RoleWorker, "auth")
+	b := tagged("b", "/tmp/pt-red", session.RoleWorker, "billing")
+	h := tagsHome(t, a1, a2, b)
+	gi := map[string]*git.RepoInfo{"/tmp/pt-red": {OriginKey: "github.com/acme/pt", PR: red}}
+	h.gitInfoCache.Store(&gi)
+	// a1 is muted by its own snooze: the jump must still reach its checkout via a2.
+	a1.SetSnoozedUntil(time.Now().Add(time.Hour))
+	h.rebuildFlatItems()
+	h.cursor = rowIndex(h, taskHeader("auth"))
+
+	h.jumpToNextAttentionPR()
+	if it := h.flatItems[h.cursor]; it.Session != a2 {
+		t.Fatalf("first P landed on %+v, want a2 (a1 is muted)", it)
+	}
+	h.jumpToNextAttentionPR()
+	if it := h.flatItems[h.cursor]; it.Session != b {
+		t.Fatalf("second P landed on %+v, want b — a new run in another task", it)
+	}
+}
+
+func TestTaskKeysPersist(t *testing.T) {
+	h := tagsHome(t)
+	until := time.Now().Add(time.Hour).Truncate(time.Second)
+	if err := h.storage.SetGroupCollapsed(TaskExpandKey("auth"), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.storage.SetGroupSnooze(TaskExpandKey("auth"), until); err != nil {
+		t.Fatal(err)
+	}
+	collapsed, _ := h.storage.LoadCollapsedGroups()
+	snoozed, _ := h.storage.LoadSnoozedGroups()
+	if !strings.Contains(strings.Join(collapsed, ","), "task:auth") || !snoozed["task:auth"].Equal(until) {
+		t.Errorf("task keys didn't round-trip: collapsed=%v snoozed=%v", collapsed, snoozed)
 	}
 }

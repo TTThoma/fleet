@@ -263,9 +263,14 @@ func (h *Home) toggleSidebarGroupBy() {
 // row it was on. A row that no longer exists — a task header after switching
 // to the repo view, a checkout header hidden because every session in it now
 // sits under a task — falls back to the first member of that task or the first
-// session of that checkout, and otherwise to a clamped index.
+// session of that checkout or origin, and otherwise to a clamped index.
 func (h *Home) rebuildKeepingCursor() {
-	target := h.targetForCursor()
+	h.restoreCursorTo(h.targetForCursor())
+}
+
+// restoreCursorTo rebuilds and lands on target, with rebuildKeepingCursor's
+// fallbacks.
+func (h *Home) restoreCursorTo(target contextMenuTarget) {
 	h.rebuildFlatItems()
 	idx := target.find(h.flatItems)
 	if idx < 0 {
@@ -274,7 +279,8 @@ func (h *Home) rebuildKeepingCursor() {
 				continue
 			}
 			if (target.taskKey != "" && it.Session.GetTags().Task == target.taskKey) ||
-				(target.repoPath != "" && it.RepoPath == target.repoPath) {
+				(target.repoPath != "" && it.RepoPath == target.repoPath) ||
+				(target.originKey != "" && it.OriginKey == target.originKey) {
 				idx = i
 				break
 			}
