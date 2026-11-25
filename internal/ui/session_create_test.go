@@ -239,7 +239,7 @@ func TestCreateDialogFocusLeavesTheInertAccountRow(t *testing.T) {
 	tap(&d, "up")
 	tap(&d, "right") // Claude -> Codex, with focus on Agent
 	tap(&d, "down")  // must not land on the now-inert Account row
-	if d.focus != focusCreateAgent {
+	if d.focus == focusCreateAccount {
 		t.Error("focus moved onto the Account row while it was inert on a Codex session")
 	}
 	if view := ansi.Strip(d.View()); !strings.Contains(view, "Claude only") {
@@ -254,42 +254,36 @@ func TestCreateDialogFocusLeavesTheInertAccountRow(t *testing.T) {
 
 // Below two accounts every session runs on the same credential, so the row would
 // be a constant — the rule previewAccountLabel already applies to the preview
-// footer.
+// footer. ↓ skips straight to the Role row: it must never stand on a row that
+// isn't there.
 func TestCreateDialogHasNoAccountRowBelowTwoAccounts(t *testing.T) {
 	d := showCreate(t, nil)
 	view := ansi.Strip(d.View())
 	if strings.Contains(view, "Account") {
 		t.Errorf("an Account row was rendered with no accounts configured:\n%s", view)
 	}
-	// ↑↓ are dead with one row, so the footer must not advertise them.
-	if strings.Contains(view, "↑↓") {
-		t.Errorf("the footer advertises ↑↓ with only one row to stand on:\n%s", view)
-	}
 	tap(&d, "down")
-	if d.focus != focusCreateAgent {
-		t.Error("focus left the Agent row when it is the only one")
+	if d.focus != focusCreateRole {
+		t.Errorf("down from Agent landed on %v, want the Role row", d.focus)
 	}
 	if msg := created(t, tap(&d, "enter")); msg.account != "" {
 		t.Errorf("account = %q, want empty", msg.account)
 	}
 }
 
-// `tab` advances the agent on master. Routing it through moveFocus made it do
-// nothing at all here — for the majority of users, with no footer hint to signal
-// the key had changed meaning. It has to keep advancing the only cycler on
-// screen. (↑↓/j/k going inert is fine: they were never bound.)
-func TestCreateDialogTabStillCyclesTheAgentBelowTwoAccounts(t *testing.T) {
+// tab is "next row" in every multi-field dialog here. On master, with no
+// Account row, tab cycled the agent instead, because moving rows would have
+// done nothing; with the Role and Task rows there is always another row, so
+// tab moving to it is the visible, consistent meaning.
+func TestCreateDialogTabMovesToTheRoleRowBelowTwoAccounts(t *testing.T) {
 	d := showCreate(t, nil)
-	if d.agent != agent.Claude {
-		t.Fatalf("opened on %q, want claude", d.agent)
-	}
 	tap(&d, "tab")
-	if d.agent != agent.Codex {
-		t.Errorf("tab left the agent on %q; on master it advanced to codex", d.agent)
+	if d.focus != focusCreateRole || d.agent != agent.Claude {
+		t.Errorf("tab: focus %v agent %q, want the Role row and the agent untouched", d.focus, d.agent)
 	}
 	tap(&d, "shift+tab")
-	if d.agent != agent.Claude {
-		t.Errorf("shift+tab left the agent on %q, want claude", d.agent)
+	if d.focus != focusCreateAgent {
+		t.Errorf("shift+tab: focus %v, want the Agent row", d.focus)
 	}
 }
 

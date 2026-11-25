@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/ticket"
 	"github.com/brizzai/fleet/internal/workspace"
 )
@@ -34,6 +35,8 @@ type (
 		name, branch, baseBranch string
 		repoPath                 string
 		provider                 workspace.Provider
+		// tags are the new session's team tags (WorktreeDialog.inherit).
+		tags session.Tags
 		// ticket is the issue this branch name was derived from, nil when the
 		// user typed a name. Carried rather than re-fetched: the dialog
 		// already paid the round trip while the user was looking at the form,
@@ -55,6 +58,7 @@ type (
 		ticketErr error
 		// ticketTracker is the provider's display name, for the status line.
 		ticketTracker string
+		tags          session.Tags // carried from workspaceCreateMsg
 	}
 	// deleteCleanupDoneMsg fires when finalizeDelete's background cleanup
 	// (tmux kill, hook removal, optional workspace destroy) completes. The
@@ -88,6 +92,7 @@ type CreateWorkspaceDialog struct {
 	isNative    bool // true for git worktree (single field), false for custom shell
 	repoPath    string
 	provider    workspace.Provider
+	inherit     session.Tags // from the WorktreeDialog that opened this one
 }
 
 // NewCreateWorkspaceDialog creates a new create workspace dialog.
@@ -223,8 +228,9 @@ func (d *CreateWorkspaceDialog) Update(msg tea.Msg) (*CreateWorkspaceDialog, tea
 			name := workspace.SanitizeBranchName(branch)
 			provider := d.provider
 			repoPath := d.repoPath
+			tags := d.inherit
 			return d, func() tea.Msg {
-				return workspaceCreateMsg{name: name, branch: branch, repoPath: repoPath, provider: provider}
+				return workspaceCreateMsg{name: name, branch: branch, repoPath: repoPath, provider: provider, tags: tags}
 			}
 		}
 		// Custom shell mode.
@@ -237,8 +243,9 @@ func (d *CreateWorkspaceDialog) Update(msg tea.Msg) (*CreateWorkspaceDialog, tea
 		branch := strings.TrimSpace(d.branchInput.Value())
 		provider := d.provider
 		repoPath := d.repoPath
+		tags := d.inherit
 		return d, func() tea.Msg {
-			return workspaceCreateMsg{name: name, branch: branch, repoPath: repoPath, provider: provider}
+			return workspaceCreateMsg{name: name, branch: branch, repoPath: repoPath, provider: provider, tags: tags}
 		}
 	}
 

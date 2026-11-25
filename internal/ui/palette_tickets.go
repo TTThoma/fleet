@@ -223,6 +223,7 @@ func (h *Home) openTicketFromPalette(identifier string) (tea.Model, tea.Cmd) {
 	// always confirms them.
 	h.pendingTicketID = identifier
 	h.pendingTicketProvider = providerKind
+	h.worktreeDialog.SetInherit(session.Tags{}) // opened from a ticket, not a row
 	h.worktreeDialog.ShowLoading()
 	return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 }

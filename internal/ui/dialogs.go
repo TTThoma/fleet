@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
+	"github.com/brizzai/fleet/internal/session"
 )
 
 // sessionCreateMsg is sent when the user confirms creating a new session.
@@ -34,6 +35,12 @@ type sessionCreateMsg struct {
 	// rather than start). Empty for every other creation path, which is the
 	// long-standing behaviour.
 	prompt string
+	// tags are the new session's team tags; zero for every path that sets
+	// none, which is the long-standing behaviour.
+	tags session.Tags
+	// askTask opens the tag dialog on the new session, Task focused, once it
+	// exists — the `A` dialog's "new task…" option, which needs a typed name.
+	askTask bool
 }
 
 // forkSessionMsg is sent when the user forks an existing session.
@@ -50,8 +57,9 @@ type forkSessionMsg struct {
 	path                  string
 	title                 string
 	workspaceName         string
-	agent                 agent.Type // inherited from the parent session
-	accountSet            bool       // true when account was carried from the parent, even if empty
+	agent                 agent.Type   // inherited from the parent session
+	accountSet            bool         // true when account was carried from the parent, even if empty
+	tags                  session.Tags // inherited from the parent: a fork is a copy
 	// account is inherited from the parent session and must not be re-picked:
 	// the fork resumes the parent's conversation, and that conversation's
 	// prompt cache lives on the parent's account.
