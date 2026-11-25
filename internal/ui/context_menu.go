@@ -46,6 +46,11 @@ type ContextMenuDialog struct {
 	width, height int // terminal size, for clamping
 
 	clickRows overlayRowMap // filled by View; see SelectRowAt
+
+	// pick, when set, turns the menu into a picker: a chosen row's ID goes to
+	// pick instead of becoming a contextMenuMsg dispatch id. Set by ShowPicker,
+	// cleared by Show, so the `.` menu can never inherit a picker's handler.
+	pick func(id string) tea.Msg
 }
 
 // contextMenuStyle is DialogStyle without the vertical padding — a dropdown
@@ -73,6 +78,20 @@ func (d *ContextMenuDialog) SetAnchor(anchorX, rowY, bottomLimit int) {
 // Show opens the menu. Call SetAnchor first — the initial scroll clamp needs the
 // bottom limit. The cursor lands on the first enabled item, never on a dimmed one.
 func (d *ContextMenuDialog) Show(title string, items []ContextMenuItem) {
+	d.pick = nil
+	d.show(title, items)
+}
+
+// ShowPicker opens the same dropdown as a chooser over items whose IDs are
+// data (a repo path, say), not dispatch ids: picking one sends pick(id).
+// Sharing the menu's instance means a picker needs no modal registration of
+// its own — the menu's routing, overlay and mouse rows already cover it.
+func (d *ContextMenuDialog) ShowPicker(title string, items []ContextMenuItem, pick func(id string) tea.Msg) {
+	d.show(title, items)
+	d.pick = pick
+}
+
+func (d *ContextMenuDialog) show(title string, items []ContextMenuItem) {
 	d.visible = true
 	d.title = title
 	d.items = items
@@ -181,6 +200,9 @@ func (d *ContextMenuDialog) Update(msg tea.Msg) (*ContextMenuDialog, tea.Cmd) {
 
 func (d *ContextMenuDialog) fire(id string) tea.Cmd {
 	d.Hide()
+	if pick := d.pick; pick != nil {
+		return func() tea.Msg { return pick(id) }
+	}
 	return func() tea.Msg { return contextMenuMsg{id: id} }
 }
 
@@ -218,6 +240,13 @@ func (d *ContextMenuDialog) View() string {
 	for _, it := range d.items {
 		labelW = max(labelW, runeLen(d.labelOf(it)))
 		keyW = max(keyW, runeLen(it.Shortcut))
+	}
+	// A picker's title is the question its rows answer ("new worktree for
+	// @auth in"), so it is widened for rather than cut. The `.` menu keeps
+	// truncating: its title only names the row, and widening it would move
+	// every menu's box.
+	if d.pick != nil {
+		labelW = max(labelW, runeLen(d.title)-keyW-2)
 	}
 
 	end := min(d.scrollOff+d.maxVisible(), len(d.items))

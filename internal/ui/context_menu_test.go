@@ -447,6 +447,7 @@ func TestContextMenuIDsAreDispatchable(t *testing.T) {
 		menuHome(sessionRow(s), s),
 		menuHome(SidebarItem{IsRepoHeader: true, IsCheckoutHeader: true, RepoPath: "/tmp/cm-repo"}),
 		menuHome(SidebarItem{IsRepoHeader: true, IsOriginHeader: true, OriginKey: "o", OriginLabel: "o"}),
+		menuHome(SidebarItem{IsRepoHeader: true, IsTaskHeader: true, TaskKey: "t"}),
 	}
 	// ...plus the non-suspended session, whose primary action is `attach`.
 	live := session.NewSession("live", "/tmp/cm-repo")

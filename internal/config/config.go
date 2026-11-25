@@ -147,6 +147,7 @@ type Config struct {
 	ShowHeaderCounts   *bool  `json:"show_header_counts,omitempty"`   // session count on origin/checkout headers
 	ChevronStyle       string `json:"chevron_style,omitempty"`        // "triangle" (default ▾▸) or "plusminus" (−+)
 	SidebarDensity     string `json:"sidebar_density,omitempty"`      // "normal" (default) or "compact" (no inter-group gap)
+	SidebarGroupBy     string `json:"sidebar_group_by,omitempty"`     // "repo" (default) or "task" (team tags' task groups first)
 
 	// AnalyticsConsentSeen is true once the user has been shown the
 	// first-launch consent prompt and answered it (either way). When false,
@@ -675,6 +676,16 @@ func (c *Config) GetSidebarDensity() string {
 		return "compact"
 	}
 	return "normal"
+}
+
+// GetSidebarGroupBy returns how the sidebar groups sessions — "repo" (default,
+// origin → checkout tree) or "task" (one group per task tag, untagged sessions
+// in the repo tree below). Anything else reads as "repo".
+func (c *Config) GetSidebarGroupBy() string {
+	if c.SidebarGroupBy == "task" {
+		return "task"
+	}
+	return "repo"
 }
 
 // isValidTelemetryMode reports whether mode is one of the documented telemetry

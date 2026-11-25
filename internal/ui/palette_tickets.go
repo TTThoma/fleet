@@ -232,7 +232,7 @@ func (h *Home) openTicketFromPalette(identifier string) (tea.Model, tea.Cmd) {
 func (h *Home) jumpToSessionID(id string) (tea.Model, tea.Cmd) {
 	for _, s := range h.sessions {
 		if s != nil && s.ID == id {
-			h.revealCheckout(s.ProjectPath)
+			h.revealSession(s)
 			break
 		}
 	}

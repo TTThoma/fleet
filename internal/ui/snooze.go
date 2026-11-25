@@ -74,11 +74,16 @@ type snoozeResult struct {
 	// the countdown lives on the group header, so N children don't render N
 	// copies of the same number.
 	OwnTimer bool
+	// ByTask names the task whose snooze mutes the session, when that is the
+	// cause. In the repo view no task header is drawn to carry the clock, so the
+	// selected row says which task to wake (`g`, then `z` on it).
+	ByTask string
 }
 
 // snoozeState resolves a session's mute. The group umbrella wins over the
 // session's own deadline: origin first (the widest scope), then checkout, then
-// the session itself. A session may hold its own snooze inside a snoozed group;
+// the session's task, then the session itself. The task umbrella applies in
+// both sidebar views — a muted session is muted however it is drawn. A session may hold its own snooze inside a snoozed group;
 // that deadline keeps ticking independently and takes effect once the group wakes.
 //
 // This is the single place the precedence rule lives. Callers consult the
@@ -89,6 +94,13 @@ func snoozeState(s *session.Session, originKey, repoPath string, groups map[stri
 	}
 	if until, ok := activeGroupSnooze(groups, repoPath, now); ok {
 		return snoozeResult{Muted: true, Until: until}
+	}
+	if s != nil {
+		if task := s.GetTags().Task; task != "" {
+			if until, ok := activeGroupSnooze(groups, TaskExpandKey(task), now); ok {
+				return snoozeResult{Muted: true, Until: until, ByTask: task}
+			}
+		}
 	}
 	if s != nil {
 		if until := s.SnoozedUntil(); !until.IsZero() && until.After(now) {
@@ -153,8 +165,18 @@ type snoozeScope struct {
 	groupKey string
 	// label names the target in toasts ("Fix the drawer bug", "main", "fleet").
 	label string
-	// kind is the analytics dimension: session | checkout | origin.
+	// kind is the analytics dimension: session | checkout | origin | task.
 	kind string
+}
+
+// logLabel is what the action log records for the scope. A task name is free
+// text the user typed, and the action log ships in bug reports, so a task scope
+// records none — the same rule `set tags` follows.
+func (sc snoozeScope) logLabel() string {
+	if sc.kind == "task" {
+		return ""
+	}
+	return sc.label
 }
 
 // snoozeScopeAtCursor classifies the row under the cursor. Returns ok=false on
@@ -165,6 +187,8 @@ func (h *Home) snoozeScopeAtCursor() (snoozeScope, bool) {
 	}
 	item := h.flatItems[h.cursor]
 	switch {
+	case item.IsTaskHeader:
+		return snoozeScope{groupKey: TaskExpandKey(item.TaskKey), label: "@" + item.TaskKey, kind: "task"}, true
 	case item.IsOriginHeader:
 		return snoozeScope{groupKey: OriginExpandKey(item.OriginKey), label: labelForOrigin(item.OriginKey), kind: "origin"}, true
 	case item.IsCheckoutHeader:
@@ -211,7 +235,7 @@ func (h *Home) applySnoozeUntil(sc snoozeScope, until time.Time, durationID stri
 		h.setExpanded(sc.groupKey, false)
 	}
 	h.rebuildFlatItems()
-	h.logAction("snooze "+sc.kind, sc.label, true)
+	h.logAction("snooze "+sc.kind, sc.logLabel(), true)
 	analytics.Track(analytics.EventSnoozeSet, map[string]interface{}{
 		"scope":    sc.kind,
 		"duration": durationID,
@@ -243,7 +267,7 @@ func (h *Home) clearSnooze(sc snoozeScope) {
 		h.setExpanded(sc.groupKey, true)
 	}
 	h.rebuildFlatItems()
-	h.logAction("wake "+sc.kind, sc.label, true)
+	h.logAction("wake "+sc.kind, sc.logLabel(), true)
 	analytics.Track(analytics.EventSnoozeCleared, map[string]interface{}{
 		"scope":  sc.kind,
 		"reason": "manual",

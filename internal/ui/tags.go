@@ -78,7 +78,6 @@ func (h *Home) sendExternalRetags(rows []*session.SessionRow, mem map[string]ses
 // timer, so the cursor is re-found by identity: a retag can move a row in or
 // out of an active filter, which matches task and specialty.
 func (h *Home) handleExternalRetags(msg externalRetagMsg) (tea.Model, tea.Cmd) {
-	target := h.targetForCursor()
 	changed := false
 	for _, c := range msg.changes {
 		s := h.sessionByID[c.id]
@@ -92,11 +91,9 @@ func (h *Home) handleExternalRetags(msg externalRetagMsg) (tea.Model, tea.Cmd) {
 	if !changed {
 		return h, nil
 	}
-	h.rebuildFlatItems()
-	if idx := target.find(h.flatItems); idx >= 0 {
-		h.cursor = idx
-	}
-	h.syncViewport()
+	// A retag can make the cursor's row vanish (a task header whose last member
+	// left), so restore by identity with the same fallbacks the `g` toggle uses.
+	h.rebuildKeepingCursor()
 	return h, nil
 }
 
@@ -176,12 +173,11 @@ func (h *Home) setTagsSelected(t session.Tags) {
 		h.setError("set_tags_failed", err)
 		return
 	}
-	target := h.targetForCursor()
-	h.rebuildFlatItems()
-	if idx := target.find(h.flatItems); idx >= 0 {
-		h.cursor = idx
+	if t := t.Task; t != "" {
+		// Retagging into a folded task must not hide the row being edited.
+		h.repoExpanded[TaskExpandKey(t)] = true
 	}
-	h.syncViewport()
+	h.rebuildKeepingCursor()
 	if t.IsZero() {
 		h.setInfo("Tags cleared")
 	} else {
@@ -208,6 +204,13 @@ func (h *Home) openSessionCreateDialog(repoPath string) {
 // the worker it spawns will do. Zero when the row is not a session or has no
 // task, which is the long-standing untagged behaviour.
 func (h *Home) worktreeInheritTags() session.Tags {
+	// On a task header (by-task view) the new worktree is that task's next
+	// worker: `w` there means "add a worker to this team".
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+		if item := h.flatItems[h.cursor]; item.IsTaskHeader {
+			return session.Tags{Role: session.RoleWorker, Task: item.TaskKey}
+		}
+	}
 	s := h.selectedSession()
 	if s == nil {
 		return session.Tags{}
@@ -217,4 +220,72 @@ func (h *Home) worktreeInheritTags() session.Tags {
 		return session.Tags{}
 	}
 	return session.Tags{Role: session.RoleWorker, Task: task}
+}
+
+// groupByCommandName names the palette command for the view it switches to.
+func (h *Home) groupByCommandName() string {
+	if SidebarGroupBy == "task" {
+		return "Group Sidebar by Repo"
+	}
+	return "Group Sidebar by Task"
+}
+
+// toggleSidebarGroupBy flips the sidebar between the repo tree and task groups
+// (`g`, the palette, Settings → Layout). Persisted, like every Appearance
+// setting.
+func (h *Home) toggleSidebarGroupBy() {
+	next := "task"
+	if SidebarGroupBy == "task" {
+		next = "repo"
+	}
+	h.cfg.SidebarGroupBy = next
+	if next == "repo" {
+		h.cfg.SidebarGroupBy = "" // the default, so config.json stays as it was
+	}
+	if err := h.cfg.Save(); err != nil {
+		debuglog.Logger.Error("failed to save sidebar grouping", "err", err)
+	}
+	ApplyDisplayConfig(h.cfg)
+	h.logAction("group sidebar", next, true)
+	h.rebuildKeepingCursor()
+	if next == "task" {
+		if len(tasksInUse(h.sessions)) == 0 {
+			h.setInfo("Grouped by task — no session has a task yet (T to tag one)")
+			return
+		}
+		h.setInfo("Grouped by task")
+		return
+	}
+	h.setInfo("Grouped by repo")
+}
+
+// rebuildKeepingCursor rebuilds the sidebar and puts the cursor back on the
+// row it was on. A row that no longer exists — a task header after switching
+// to the repo view, a checkout header hidden because every session in it now
+// sits under a task — falls back to the first member of that task or the first
+// session of that checkout, and otherwise to a clamped index.
+func (h *Home) rebuildKeepingCursor() {
+	target := h.targetForCursor()
+	h.rebuildFlatItems()
+	idx := target.find(h.flatItems)
+	if idx < 0 {
+		for i, it := range h.flatItems {
+			if it.Session == nil {
+				continue
+			}
+			if (target.taskKey != "" && it.Session.GetTags().Task == target.taskKey) ||
+				(target.repoPath != "" && it.RepoPath == target.repoPath) {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx >= 0 {
+		h.cursor = idx
+	} else {
+		// Only when the row is gone: clampCursor steps off headers, which would
+		// pull the cursor off a header it was legitimately still on.
+		h.clampCursor()
+	}
+	h.syncViewport()
 }
