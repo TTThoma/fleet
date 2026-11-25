@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, main-thomas]
   pull_request:
-    branches: [master]
+    branches: [master, main-thomas]
 
 env:
   GO_VERSION: "1.26.11"
