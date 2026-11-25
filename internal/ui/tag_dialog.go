@@ -5,6 +5,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -108,8 +109,33 @@ func (d *TagDialog) Hide() {
 	d.task.Blur()
 }
 
-func (d *TagDialog) IsVisible() bool  { return d.visible }
-func (d *TagDialog) SetSize(w, h int) { d.width, d.height = w, h }
+func (d *TagDialog) IsVisible() bool { return d.visible }
+
+// Box geometry. Fixed width so nothing reflows as you type; the widest footer
+// hint fits inner at the comfortable size, and every line is truncated to it
+// below that.
+const (
+	tagContentW = 46
+	tagChrome   = 6  // DialogStyle: border + padding each side (see SnoozeDialog)
+	tagLabelW   = 11 // " Specialty " column
+)
+
+func (d *TagDialog) boxWidth() int {
+	return min(tagContentW, max(d.width-6, tagChrome+1))
+}
+
+func (d *TagDialog) inner() int { return max(d.boxWidth()-tagChrome, 1) }
+
+// SetSize also fits the text inputs to the box: at a narrow terminal a fixed
+// 20-wide input plus its label is wider than the box, and the row wraps.
+func (d *TagDialog) SetSize(w, h int) {
+	d.width, d.height = w, h
+	// A row is " " + label + " " + the input, which draws a 2-cell prompt and
+	// one cell for the caret past its width.
+	iw := max(d.inner()-1-tagLabelW-1-2-1, 4)
+	d.spec.SetWidth(min(iw, 20))
+	d.task.SetWidth(min(iw, 20))
+}
 
 // SetAnchor positions the dropdown against its sidebar row, same contract as
 // ContextMenuDialog.SetAnchor.
@@ -256,17 +282,8 @@ func (d *TagDialog) View() string {
 	if !d.visible {
 		return ""
 	}
-	// Fixed width and height: nothing in the box reflows as you type. The widest
-	// footer line must fit inner without wrapping.
-	const contentW = 46
-	boxW := contentW
-	if m := d.width - 6; boxW > m {
-		boxW = m
-	}
-	const chrome = 6 // DialogStyle: border + padding each side (see SnoozeDialog)
-	inner := max(boxW-chrome, 1)
-
-	const labelW = 11
+	boxW, inner := d.boxWidth(), d.inner()
+	const labelW = tagLabelW
 	row := func(i int, label, value string) string {
 		l := " " + padRight(label, labelW-1) // pad raw, then style
 		if d.focus == i {
@@ -317,16 +334,21 @@ func (d *TagDialog) View() string {
 	// Footer: what Enter does now, or why it won't. Exactly one line in every
 	// state, so the box height never moves.
 	b.WriteString("\n")
+	// Every variant is truncated to inner: on a narrow terminal a hint that
+	// wraps grows the box a row the moment the highlight moves.
+	foot := func(st lipgloss.Style, text string) {
+		b.WriteString(st.Render(ansi.Truncate("  "+text, inner, "…")))
+	}
 	_, bad := d.parsed()
 	switch {
 	case bad != "":
-		b.WriteString(ErrorStyle.Render("  " + ansi.Truncate(bad, inner-2, "…")))
+		foot(ErrorStyle, bad)
 	case d.onSuggestion():
-		b.WriteString(DimStyle.Render("  enter use task • ↑↓ move • esc cancel"))
+		foot(DimStyle, "enter use task • ↑↓ move • esc cancel")
 	case d.focus == tagFocusRole:
-		b.WriteString(DimStyle.Render("  ←→ role • ↑↓ field • enter save"))
+		foot(DimStyle, "←→ role • ↑↓ field • enter save")
 	default:
-		b.WriteString(DimStyle.Render("  enter save • tab field • esc cancel"))
+		foot(DimStyle, "enter save • tab field • esc cancel")
 	}
 	return DialogStyle.Width(boxW).Render(b.String())
 }

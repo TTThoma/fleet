@@ -803,11 +803,15 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 }
 
 // Role glyphs mark the two roles a team has one of. Same rules as the agent
-// glyphs: width-1, East-Asian-Neutral, from Misc Symbols (the block `⚇` and
-// `☾` already come from), dim and monochrome. Workers get none: they are most
-// of a team, and their specialty suffix already says what they do.
+// glyphs: width-1, East-Asian-Neutral, dim and monochrome. Workers get none:
+// they are most of a team, and their specialty suffix already says what they do.
+//
+// Neither may be an emoji-capable codepoint. ♦ (U+2666) was the first pick and
+// is one (Emoji=Yes, text by default): a terminal falling back to a colour
+// emoji font can draw it red and two cells wide, which no width table sees.
+// ❖ is Dingbats, ⚑ Misc Symbols, and neither is in the emoji set.
 const (
-	orchestratorGlyph = "♦" // U+2666 — the one that directs
+	orchestratorGlyph = "❖" // U+2756 — the one that directs
 	conciergeGlyph    = "⚑" // U+2691 — the one that flags things for you
 )
 

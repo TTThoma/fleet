@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -283,12 +284,33 @@ func TestTagDialogSuggestionFillsTask(t *testing.T) {
 
 // Fixed size: the box never changes height as you type or move.
 func TestTagDialogHeightIsStable(t *testing.T) {
+	// 49 is the single-pane breakpoint, where inner drops below the longest
+	// footer hint; 120 is the comfortable case.
+	for _, w := range []int{120, 79, 49, 40} {
+		t.Run(fmt.Sprint(w), func(t *testing.T) { tagDialogHeightIsStableAt(t, w) })
+	}
+}
+
+func tagDialogHeightIsStableAt(t *testing.T, width int) {
 	d := openDialog(session.Tags{}, "auth-rework", "billing", "checkout", "docs")
+	d.SetSize(width, 24)
 	want := strings.Count(d.View(), "\n")
+	// Same height as at a comfortable width: a row that wraps in every state is
+	// stable, and still wrong.
+	ref := openDialog(session.Tags{}, "auth-rework")
+	if base := strings.Count(ref.View(), "\n"); want != base {
+		t.Errorf("width %d: box is %d lines, %d at 120 — a row wraps", width, want+1, base+1)
+	}
 	check := func(step string) {
 		t.Helper()
-		if got := strings.Count(d.View(), "\n"); got != want {
-			t.Errorf("after %s: %d lines, want %d", step, got+1, want+1)
+		v := d.View()
+		if got := strings.Count(v, "\n"); got != want {
+			t.Errorf("width %d, after %s: %d lines, want %d", width, step, got+1, want+1)
+		}
+		for _, line := range strings.Split(ansi.Strip(v), "\n") {
+			if w := ansi.StringWidth(line); w > width {
+				t.Errorf("width %d, after %s: a line is %d wide: %q", width, step, w, line)
+			}
 		}
 	}
 	d.Update(special(tea.KeyTab))
@@ -303,6 +325,10 @@ func TestTagDialogHeightIsStable(t *testing.T) {
 	d.Update(special(tea.KeyBackspace))
 	d.Update(special(tea.KeyDown))
 	check("a suggestion highlighted")
+	d.Update(special(tea.KeyUp))
+	d.Update(special(tea.KeyUp))
+	d.Update(special(tea.KeyUp))
+	check("back on the role row")
 }
 
 // Text the user types into a field must be typed, not read as a command key:
