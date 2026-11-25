@@ -38,6 +38,9 @@ type addOpts struct {
 	prompt string
 	model  string
 	effort string
+	// tagFlags and tags are the team tags: raw flags, then validated.
+	tagFlags tagFlagVals
+	tags     session.Tags
 }
 
 // addFlagSet builds the `fleet add` flag set, binding into o. The flag package
@@ -52,6 +55,7 @@ func addFlagSet(o *addOpts) *flag.FlagSet {
 	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")
 	fs.StringVar(&o.model, "model", "", "model to launch on, e.g. opus or anthropic/claude-sonnet-5 (default: the agent's own)")
 	fs.StringVar(&o.effort, "effort", "", "reasoning effort to launch at, e.g. high or xhigh (default: the agent's own)")
+	bindTagFlags(fs, &o.tagFlags)
 	return fs
 }
 
@@ -138,6 +142,12 @@ func parseAddArgs(args []string) (addOpts, error) {
 	if err := validateLaunchOverrides(o.model, o.effort, o.agentName); err != nil {
 		return o, err
 	}
+	o.tagFlags.noteVisited(fs)
+	tags, err := o.tagFlags.apply(session.Tags{})
+	if err != nil {
+		return o, err
+	}
+	o.tags = tags
 	return o, nil
 }
 
@@ -262,9 +272,13 @@ func runAdd(args []string) {
 		prompt:  prompt,
 		model:   opts.model,
 		effort:  opts.effort,
+		tags:    opts.tags,
 	}, storage, launchNotes{})
 
 	fmt.Printf("Created %s session '%s' (%s) in %s\n", ag.DisplayName(), title, s.ID, path)
+	if !opts.tags.IsZero() {
+		fmt.Printf("Tagged: %s\n", describeTags(opts.tags))
+	}
 	// Echo the prompt back: with `-p -` the text came from a pipe the user never
 	// saw, and this is the only confirmation that what arrived is what they meant.
 	if prompt != "" {

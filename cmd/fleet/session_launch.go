@@ -205,6 +205,7 @@ type launchOverrides struct {
 	prompt  string
 	model   string
 	effort  string
+	tags    session.Tags
 }
 
 // launchNotes carries what a caller has already created and is keeping, so a
@@ -234,6 +235,7 @@ func launchSession(s *session.Session, ag agent.Type, o launchOverrides, storage
 	s.InitialPrompt = o.prompt
 	s.Model = o.model
 	s.Effort = o.effort
+	s.Role, s.Specialty, s.Task = o.tags.Role, o.tags.Specialty, o.tags.Task
 
 	if err := s.Start(); err != nil {
 		// The prefix, when there is one, is a clause the failure continues

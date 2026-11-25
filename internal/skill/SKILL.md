@@ -212,6 +212,28 @@ would fail with "No conversation found"); `--fresh` starts a new conversation.
 `fleet list` still prints id, title, status and path from fleet's database alone, without
 reading any pane.
 
+## Roles and tasks
+
+When several sessions work one task together, tag them so fleet (and you) can tell the
+team apart:
+
+```bash
+fleet tag self --role orchestrator --task auth-rework      # tag the session you run in
+fleet wt fix-login --role worker --specialty impl --task auth-rework -p "<task>"
+fleet tag --role worker --specialty gh auth-issues          # tag an existing session
+fleet status --task auth-rework                              # just this team
+fleet status --task auth-rework --role worker --waiting      # its blocked workers
+```
+
+- Roles are `orchestrator` (breaks the task down and hands out work), `concierge` (the
+  user's single point of contact) and `worker`. `--specialty` is a short free-text tag
+  shown on the row (`gh`, `infra`, `repo-x`); `--task` is a slug grouping the team.
+- A flag left out leaves that tag alone; `none` clears it. `self` is the session the
+  command runs in.
+- A **worker's finished turn reads `idle`**, not `finished`: it is the orchestrator's to
+  collect, not the user's. A worker blocked on a prompt still reads `waiting`, and
+  `fleet wait --until done` still returns when it finishes.
+
 ## Two things not to do
 
 - **Never run bare `fleet`.** It launches a full-screen TUI and will hang a

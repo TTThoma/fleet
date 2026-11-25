@@ -9443,6 +9443,9 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 	switch {
 	case status != session.StatusIdle:
 		unread.Note = "idle only"
+	case s.GetTags().Role.QuietWhenFinished():
+		// Mirrors markUnreadSelected: the next status pass would rest it idle.
+		unread.Note = "workers don't stay unread"
 	case s.GetHookStatus() == "":
 		unread.Note = "hasn't run yet"
 	default:
@@ -10225,6 +10228,12 @@ func (h *Home) markUnreadSelected() {
 	// session sitting at its prompt) would be flipped straight back to idle by the
 	// worker's no-hook path, so the mark wouldn't stick. Only sessions with hook
 	// state settle to Finished from Acknowledged=false.
+	// A worker's finished turns rest as idle (session/role.go), so the flip
+	// would be undone on the next status pass — refuse instead of flickering.
+	if s.GetTags().Role.QuietWhenFinished() {
+		h.setInfo("Workers don't stay unread — their finished turns rest as idle")
+		return
+	}
 	if s.GetHookStatus() == "" {
 		h.setInfo("Session hasn't run yet — nothing to mark unread")
 		return

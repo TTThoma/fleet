@@ -64,6 +64,8 @@ func main() {
 		runWorktree(args[1:])
 	case "send":
 		runSend(args[1:])
+	case "tag":
+		runTag(args[1:])
 	case "status", "st":
 		runStatus(args[1:])
 	case "read":
@@ -347,14 +349,18 @@ func printUsage() {
 Usage:
   fleet              Launch TUI
   fleet add [path]   Add a new session in a directory (default: current)
-                           (--agent, --account, --prompt, --model, --effort)
+                           (--agent, --account, --prompt, --model, --effort,
+                            --role, --specialty, --task)
   fleet list         List all sessions
   fleet remove <session>  Remove a session
   fleet worktree <branch>  Create a git worktree and start a session in it
                            (--base, --path, --agent, --account, --no-session,
-                            --prompt, --ticket, --model, --effort)
+                            --prompt, --ticket, --model, --effort,
+                            --role, --specialty, --task)
   fleet send <session> <message>  Send a message to a running session
                            (--wait: then wait for the turn and print the reply)
+  fleet tag <session|self>...  Set team tags: --role orchestrator|concierge|worker,
+                           --specialty, --task ('none' clears)
 
 Watch and drive sessions (one-shot, never the TUI; --help on each):
   fleet status [session...]  Live status of every session: what each is waiting

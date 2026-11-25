@@ -190,6 +190,12 @@ func TestContextMenuNotesNameTheRealReason(t *testing.T) {
 		{"mark unread, idle but never ran", "mark_unread", func(s *session.Session) {
 			s.SetStatus(session.StatusIdle)
 		}, "hasn't run yet"},
+		// It IS idle and may have run — but a worker's finished turns rest as
+		// idle, so the mark would be undone on the next status pass.
+		{"mark unread, worker", "mark_unread", func(s *session.Session) {
+			s.SetStatus(session.StatusIdle)
+			s.SetTags(session.Tags{Role: session.RoleWorker})
+		}, "workers don't stay unread"},
 
 		{"approve, not waiting", "approve", func(s *session.Session) {
 			s.SetStatus(session.StatusIdle)
