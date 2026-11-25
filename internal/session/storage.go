@@ -57,6 +57,12 @@ type SessionRow struct {
 	// SnoozedUntil is the deadline past which the session rejoins the
 	// attention surfaces. Zero = not snoozed.
 	SnoozedUntil time.Time
+	// Role, Specialty and Task tag a session as part of a team of agents
+	// working one task. All empty for an untagged session, which behaves
+	// exactly as sessions did before tags existed. See role.go.
+	Role      string
+	Specialty string
+	Task      string
 }
 
 // ShellRow is the persisted form of a drawer shell (a plain non-agent
@@ -232,6 +238,18 @@ func (s *StateDB) migrate() error {
 		}
 	}
 
+	// Team tags: role, specialty, task. Empty on every pre-existing row, which
+	// is the untagged session — the behaviour before tags existed.
+	for _, col := range []string{"role", "specialty", "task"} {
+		if !s.hasColumn("sessions", col) {
+			_, err = s.db.Exec(`ALTER TABLE sessions ADD COLUMN ` + col + ` TEXT NOT NULL DEFAULT ''`)
+			if err != nil {
+				debuglog.Logger.Error("migration failed: add tag column", "column", col, "error", err)
+				return err
+			}
+		}
+	}
+
 	_, err = s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS slot_bindings (
 			slot_number INTEGER PRIMARY KEY CHECK (slot_number BETWEEN 0 AND 9),
@@ -343,14 +361,15 @@ func (s *StateDB) hasColumn(table, column string) bool {
 // SaveSession inserts or replaces a session row.
 func (s *StateDB) SaveSession(row *SessionRow) error {
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until, role, specialty, task)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		row.ID, row.Title, row.ProjectPath, string(agent.Parse(row.Agent)), row.Account, row.Status, row.TmuxSession,
 		row.CreatedAt.Unix(), row.LastAccessed.Unix(), boolToInt(row.Acknowledged),
 		row.ClaudeSessionID, row.WorkspaceName,
 		boolToInt(row.ManuallyRenamed), row.FirstPrompt, boolToInt(row.TitleGenerated),
 		row.PromptCount, timeToUnix(row.SnoozedUntil),
+		row.Role, row.Specialty, row.Task,
 	)
 	if err != nil {
 		debuglog.Logger.Error("failed to save session", "id", row.ID, "error", err)
@@ -361,7 +380,7 @@ func (s *StateDB) SaveSession(row *SessionRow) error {
 // LoadSessions returns all sessions ordered by creation time.
 func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until
+		SELECT id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until, role, specialty, task
 		FROM sessions ORDER BY created_at
 	`)
 	if err != nil {
@@ -375,7 +394,7 @@ func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 		var r SessionRow
 		var createdAt, lastAccessed, snoozedUntil int64
 		var ack, manuallyRenamed, titleGenerated int
-		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Account, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount, &snoozedUntil); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Account, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount, &snoozedUntil, &r.Role, &r.Specialty, &r.Task); err != nil {
 			debuglog.Logger.Error("failed to scan session row", "error", err)
 			return nil, err
 		}
@@ -540,6 +559,21 @@ func (s *StateDB) UpdateAccount(id, account string) error {
 		debuglog.Logger.Error("failed to update session account", "id", id, "error", err)
 	}
 	return err
+}
+
+// UpdateTags sets a session's role, specialty and task in one write. The only
+// writer of those columns after creation, used by both `fleet tag` and the
+// TUI — a per-column UPDATE, so it never races a full-row rewrite.
+func (s *StateDB) UpdateTags(id, role, specialty, task string) error {
+	res, err := s.db.Exec("UPDATE sessions SET role = ?, specialty = ?, task = ? WHERE id = ?", role, specialty, task, id)
+	if err != nil {
+		debuglog.Logger.Error("failed to update session tags", "id", id, "error", err)
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("session %s not found", id)
+	}
+	return nil
 }
 
 // UpdateTitle updates the session title.

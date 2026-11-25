@@ -66,6 +66,9 @@ type worktreeOpts struct {
 	// time — see validateLaunchOverrides.
 	model  string
 	effort string
+	// tagFlags and tags are the team tags: raw flags, then validated.
+	tagFlags tagFlagVals
+	tags     session.Tags
 }
 
 // worktreeFlagSet builds the `fleet worktree` flag set, binding into o.
@@ -91,6 +94,7 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.BoolVar(&o.noTicketStart, "no-ticket-start", false, "don't move the issue to its first started state")
 	fs.StringVar(&o.model, "model", "", "model to launch on, e.g. opus or anthropic/claude-sonnet-5 (default: the agent's own)")
 	fs.StringVar(&o.effort, "effort", "", "reasoning effort to launch at, e.g. high or xhigh (default: the agent's own)")
+	bindTagFlags(fs, &o.tagFlags)
 	return fs
 }
 
@@ -219,6 +223,17 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 	if err := validateLaunchOverrides(o.model, o.effort, o.agentName); err != nil {
 		return o, err
 	}
+	o.tagFlags.noteVisited(fs)
+	if o.noSession {
+		if err := o.tagFlags.noSessionTagError(); err != nil {
+			return o, err
+		}
+	}
+	tags, err := o.tagFlags.apply(session.Tags{})
+	if err != nil {
+		return o, err
+	}
+	o.tags = tags
 	return o, nil
 }
 
@@ -462,6 +477,7 @@ func runWorktree(args []string) {
 		prompt:  prompt,
 		model:   opts.model,
 		effort:  opts.effort,
+		tags:    opts.tags,
 	}, storage, launchNotes{
 		startFailPrefix: fmt.Sprintf("Created worktree %s, but ", info.Path),
 		keptOnTeardown:  fmt.Sprintf(" The worktree %s was kept.", info.Path),
@@ -469,6 +485,9 @@ func runWorktree(args []string) {
 
 	fmt.Printf("Created worktree %s (%s)\n", info.Path, branchNote(opts.branch, reusedBranch))
 	fmt.Printf("Started %s session '%s' (%s)\n", ag.DisplayName(), name, s.ID)
+	if !opts.tags.IsZero() {
+		fmt.Printf("Tagged: %s\n", describeTags(opts.tags))
+	}
 	// Echo the prompt back: with `-p -` the text came from a pipe the user never
 	// saw, and this is the only confirmation that what arrived is what they meant.
 	if prompt != "" {

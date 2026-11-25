@@ -313,6 +313,9 @@ type sessionJSON struct {
 	Since        *time.Time `json:"since,omitempty"`
 	For          string     `json:"for,omitempty"`
 	Agent        string     `json:"agent"`
+	Role         string     `json:"role,omitempty"`
+	Specialty    string     `json:"specialty,omitempty"`
+	Task         string     `json:"task,omitempty"`
 	Path         string     `json:"path"`
 	Branch       string     `json:"branch,omitempty"`
 	PR           *prJSON    `json:"pr,omitempty"`
@@ -390,6 +393,9 @@ func toJSON(ob *control.Observation, textMax int, withTurns bool) sessionJSON {
 		Status:       statusWord(ob),
 		Since:        timePtr(ob.Since),
 		Agent:        string(ob.Agent),
+		Role:         string(session.StoredRole(ob.Row.Role)),
+		Specialty:    ob.Row.Specialty,
+		Task:         ob.Row.Task,
 		Path:         ob.Row.ProjectPath,
 		Branch:       ob.Branch,
 		Pane:         string(ob.Pane),

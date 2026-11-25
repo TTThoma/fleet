@@ -80,6 +80,7 @@ type ScenarioCheck struct {
 type Scenario struct {
 	Name   string
 	Agent  agent.Type // empty = Claude (the default status path)
+	Role   Role       // team role (role.go); empty = untagged
 	Events []ScenarioEvent
 	Checks []ScenarioCheck
 }
@@ -107,6 +108,7 @@ func runScenario(t *testing.T, sc Scenario) {
 		Title:           sc.Name,
 		Status:          StatusStarting,
 		Agent:           sc.Agent,
+		Role:            sc.Role,
 		paneCapturer:    mock,
 		convActiveFn:    func() bool { return convActive },
 		claudeWaitingFn: func() string { return claudeWaiting },

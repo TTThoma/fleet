@@ -308,7 +308,9 @@ func (h *Home) expireSessionSnooze(s *session.Session) {
 	if err := h.storage.SetSessionSnooze(s.ID, time.Time{}); err != nil {
 		debuglog.Logger.Error("failed to clear expired session snooze", "id", s.ID, "err", err)
 	}
-	if s.GetStatus() == session.StatusIdle {
+	// Not for a worker: its finished turns rest as idle (session/role.go), so
+	// the reminder would be undone on the next status pass.
+	if s.GetStatus() == session.StatusIdle && !s.GetTags().Role.QuietWhenFinished() {
 		h.flagUnread(s)
 	}
 }

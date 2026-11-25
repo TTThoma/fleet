@@ -22,6 +22,10 @@ type statusOpts struct {
 	active    bool
 	waiting   bool
 	full      bool
+	// role and task filter by team tag; "" is no filter, "none" matches
+	// sessions without that tag.
+	role string
+	task string
 }
 
 func statusFlagSet(o *statusOpts) *flag.FlagSet {
@@ -31,6 +35,8 @@ func statusFlagSet(o *statusOpts) *flag.FlagSet {
 	fs.BoolVar(&o.active, "active", false, "only sessions running, waiting or starting")
 	fs.BoolVar(&o.waiting, "waiting", false, "only sessions waiting on a prompt")
 	fs.BoolVar(&o.full, "full", false, "don't truncate prompts and replies in JSON")
+	fs.StringVar(&o.role, "role", "", "only sessions with this role: "+session.RoleNameList()+" (none: untagged)")
+	fs.StringVar(&o.task, "task", "", "only sessions on this task (none: no task)")
 	return fs
 }
 
@@ -55,7 +61,43 @@ func parseStatusArgs(args []string) (statusOpts, error) {
 	var o statusOpts
 	pos, err := parseInterspersed(statusFlagSet(&o), args)
 	o.selectors = pos
-	return o, err
+	if err != nil {
+		return o, err
+	}
+	// Validated, so a typo is an error rather than an empty table.
+	if o.role != "" {
+		if _, err := session.ParseRole(o.role); err != nil {
+			return o, err
+		}
+	}
+	if o.task != "" {
+		if _, err := session.ParseTask(o.task); err != nil {
+			return o, err
+		}
+	}
+	return o, nil
+}
+
+// tagFilter keeps the rows matching the --role and --task filters. Applied to
+// rows before observing, so filtered-out sessions cost no pane reads and the
+// suspended count describes the same set.
+func tagFilter(rows []*session.SessionRow, o statusOpts) []*session.SessionRow {
+	if o.role == "" && o.task == "" {
+		return rows
+	}
+	role, _ := session.ParseRole(o.role) // validated in parseStatusArgs
+	task, _ := session.ParseTask(o.task)
+	var out []*session.SessionRow
+	for _, r := range rows {
+		if o.role != "" && session.StoredRole(r.Role) != role {
+			continue
+		}
+		if o.task != "" && r.Task != task {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func runStatus(args []string) {
@@ -77,6 +119,8 @@ func runStatus(args []string) {
 			}
 		}
 	}
+
+	rows = tagFilter(rows, opts)
 
 	// Suspended sessions have no pane to read; observing them only costs the
 	// transcript reads, so skip them unless they will be shown.
@@ -182,20 +226,36 @@ func printStatusTable(w io.Writer, obs []*control.Observation, suspended int, o 
 		return
 	}
 
-	type row struct{ cols [7]string }
+	// The TEAM column appears only when a shown session carries a tag, so the
+	// table of an untagged fleet reads exactly as it did before tags existed.
+	withTeam := false
+	for _, ob := range obs {
+		if !rowTags(ob.Row).IsZero() {
+			withTeam = true
+			break
+		}
+	}
+	type row struct{ cols []string }
+	header := []string{"ID", "STATUS", "FOR", "AGENT", "TITLE"}
+	if withTeam {
+		header = append(header, "TEAM")
+	}
+	header = append(header, "BRANCH", "PR")
 	rows := make([]row, 0, len(obs)+1)
-	rows = append(rows, row{[7]string{"ID", "STATUS", "FOR", "AGENT", "TITLE", "BRANCH", "PR"}})
+	rows = append(rows, row{header})
 	for _, ob := range obs {
 		forCol := "-"
 		if !ob.Since.IsZero() {
 			forCol = humanDur(time.Since(ob.Since))
 		}
-		rows = append(rows, row{[7]string{
-			hexID(ob.Row.ID), statusWord(ob), forCol, string(ob.Agent),
-			clip(ob.Row.Title, 40), clip(ob.Branch, 30), prShort(ob.PR),
-		}})
+		cols := []string{hexID(ob.Row.ID), statusWord(ob), forCol, string(ob.Agent), clip(ob.Row.Title, 40)}
+		if withTeam {
+			cols = append(cols, teamCell(rowTags(ob.Row)))
+		}
+		cols = append(cols, clip(ob.Branch, 30), prShort(ob.PR))
+		rows = append(rows, row{cols})
 	}
-	var width [7]int
+	width := make([]int, len(header))
 	for _, r := range rows {
 		for i, c := range r.cols {
 			width[i] = max(width[i], len([]rune(c)))
@@ -253,6 +313,9 @@ func printDetail(w io.Writer, ob *control.Observation) {
 		id += fmt.Sprintf("  (slot @%d)", ob.Slot)
 	}
 	kv("id", id)
+	if t := rowTags(ob.Row); !t.IsZero() {
+		kv("team", describeTags(t))
+	}
 
 	state := statusWord(ob)
 	if !ob.Since.IsZero() {
@@ -322,4 +385,30 @@ func printMenuAndInput(w io.Writer, ob *control.Observation, indent string) {
 	case session.InputSuggestion:
 		fmt.Fprintf(w, "%sinput    empty (suggestion shown, not typed: %q)\n", indent, clip(in.Text, 120))
 	}
+}
+
+// rowTags reads a stored row's team tags.
+func rowTags(r *session.SessionRow) session.Tags {
+	return session.Tags{Role: session.StoredRole(r.Role), Specialty: r.Specialty, Task: r.Task}
+}
+
+// teamCell is the compact TEAM column: "worker·gh @auth-rework", "-" untagged.
+func teamCell(t session.Tags) string {
+	if t.IsZero() {
+		return "-"
+	}
+	s := string(t.Role)
+	if t.Specialty != "" {
+		if s != "" {
+			s += "·"
+		}
+		s += t.Specialty
+	}
+	if t.Task != "" {
+		if s != "" {
+			s += " "
+		}
+		s += "@" + t.Task
+	}
+	return s
 }

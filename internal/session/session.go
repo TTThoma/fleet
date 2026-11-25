@@ -60,11 +60,16 @@ const (
 
 // Session represents a managed Claude Code session.
 type Session struct {
-	ID                   string
-	Title                string
-	ProjectPath          string
-	Agent                agent.Type // which coding agent runs in this session (claude/codex)
-	Account              string     // Claude account (email) this session authenticates as; "" = ambient /login
+	ID          string
+	Title       string
+	ProjectPath string
+	Agent       agent.Type // which coding agent runs in this session (claude/codex)
+	Account     string     // Claude account (email) this session authenticates as; "" = ambient /login
+	// Team tags (role.go). Set directly only before the session is shared;
+	// afterwards through SetTags, since the status pipeline reads Role under mu.
+	Role                 Role
+	Specialty            string
+	Task                 string
 	Status               Status
 	TmuxSessionName      string
 	CreatedAt            time.Time
@@ -1469,6 +1474,9 @@ func (s *Session) AdoptExternalSuspend() {
 func (s *Session) UpdateStatus() {
 	log := debuglog.Logger.With("session", s.ID, "title", s.Title)
 	oldStatus := s.GetStatus()
+	// A worker's finished turn rests as idle (role.go), whichever branch below
+	// concluded finished.
+	defer s.settleQuietFinished()
 
 	// Suspended is a terminal resting state we entered on purpose (tmux killed to
 	// free memory). Its tmux is gone, so the liveness gates below would flip it to
@@ -2282,6 +2290,9 @@ func (s *Session) ToRow() *SessionRow {
 		TitleGenerated:  s.TitleGenerated,
 		PromptCount:     s.PromptCount,
 		SnoozedUntil:    s.snoozedUntil,
+		Role:            string(s.Role),
+		Specialty:       s.Specialty,
+		Task:            s.Task,
 	}
 }
 
@@ -2414,6 +2425,9 @@ func FromRow(row *SessionRow) *Session {
 		FirstPrompt:     row.FirstPrompt,
 		TitleGenerated:  row.TitleGenerated,
 		PromptCount:     row.PromptCount,
+		Role:            StoredRole(row.Role),
+		Specialty:       row.Specialty,
+		Task:            row.Task,
 		// A deadline that lapsed while fleet was closed is kept, not dropped:
 		// the UI's startup reconciliation needs to see it to fire the wake
 		// reminder and clear the row. Every reader treats a past deadline as
