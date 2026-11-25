@@ -41,6 +41,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "u", Desc: "Undo delete", Section: "session"},
 	{Key: "r", BarKey: "r", BarDesc: "Restart", Desc: "Restart session", Section: "session"},
 	{Key: "R", Desc: "Rename session", Section: "session"},
+	{Key: "T", Desc: "Set role, specialty & task", Section: "session"},
 	{Key: "m", Desc: "Mark session as unread (idle → finished)", Section: "session"},
 	{Key: "z", Desc: "Snooze / wake session / repo / worktree", Section: "session"},
 	{Key: "e", Desc: "Open in editor", Section: "session"},

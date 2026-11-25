@@ -205,25 +205,46 @@ func BuildPreviewFooter(s *session.Session, account string, maxWidth int) string
 	if s == nil {
 		return ""
 	}
-	path := shortenPath(s.ProjectPath)
-	if maxWidth > 4 && lipgloss.Width(path) > maxWidth {
-		path = "…" + ansi.Truncate(reverseString(path), maxWidth-1, "")
-		path = reverseString(path)
-	}
 	// Path + last-used time render in bright text so they actually read on
 	// the bottom border instead of fading into the panel chrome. Separator
 	// stays dim to keep the two chips visually grouped.
 	bright := lipgloss.NewStyle().Foreground(ColorText)
-	parts := []string{bright.Render(path)}
+	sep := DimStyle.Render(" · ")
+
+	// The chips after the path are short and fixed; the path is long and
+	// truncates from the start. So the path is budgeted against what the others
+	// leave — budgeting it alone let it fill the border and clip the chips
+	// after it mid-word ("orchestrator·i").
+	var rest []string
 	if !s.LastAccessedAt.IsZero() {
-		parts = append(parts, bright.Render(relativeTime(s.LastAccessedAt)))
+		rest = append(rest, bright.Render(relativeTime(s.LastAccessedAt)))
+	}
+	// Team tags, dim like the account: reference for the one session you are
+	// looking at. Absent on an untagged session, so its footer is unchanged.
+	if label := teamLabel(s.GetTags()); label != "" {
+		rest = append(rest, DimStyle.Render(label))
 	}
 	// Dim, and last: it answers a question you ask occasionally, so it should
 	// not compete with the path and the clock you read at a glance.
 	if account != "" {
-		parts = append(parts, DimStyle.Render(account))
+		rest = append(rest, DimStyle.Render(account))
 	}
-	return strings.Join(parts, DimStyle.Render(" · "))
+	pathBudget := maxWidth
+	for _, r := range rest {
+		pathBudget -= lipgloss.Width(r) + lipgloss.Width(sep)
+	}
+	// Below this the path says nothing; let the border clip the tail instead.
+	const minPathWidth = 12
+	pathBudget = max(pathBudget, minPathWidth)
+
+	path := shortenPath(s.ProjectPath)
+	if maxWidth > 4 && lipgloss.Width(path) > pathBudget {
+		// Keep the TAIL (the checkout's own name) and mark the cut at the front:
+		// "…repos/api-server". Reverse, keep the first n runes, reverse back —
+		// then prefix. (Prefixing before the final reverse put the "…" at the end.)
+		path = "…" + reverseString(ansi.Truncate(reverseString(path), pathBudget-1, ""))
+	}
+	return strings.Join(append([]string{bright.Render(path)}, rest...), sep)
 }
 
 // shortenPath replaces the user's home dir with "~". Falls back to the

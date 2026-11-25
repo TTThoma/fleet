@@ -301,6 +301,7 @@ type Home struct {
 	commandPalette        *CommandPaletteDialog
 	contextMenu           *ContextMenuDialog
 	snoozeDialog          *SnoozeDialog
+	tagDialog             *TagDialog
 	accountPicker         *AccountPickerDialog
 	allowedAccounts       *AllowedAccountsDialog
 	// The row the open context menu was built for. Its entries resolve their
@@ -680,6 +681,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		commandPalette:         NewCommandPaletteDialog(),
 		contextMenu:            NewContextMenuDialog(),
 		snoozeDialog:           NewSnoozeDialog(),
+		tagDialog:              NewTagDialog(),
 		accountPicker:          NewAccountPickerDialog(),
 		allowedAccounts:        NewAllowedAccountsDialog(),
 		sessionCreateDialog:    NewSessionCreateDialog(),
@@ -1003,6 +1005,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.commandPalette.SetSize(msg.Width, msg.Height)
 		h.contextMenu.SetSize(msg.Width, msg.Height)
 		h.snoozeDialog.SetSize(msg.Width, msg.Height)
+		h.tagDialog.SetSize(msg.Width, msg.Height)
 		h.accountPicker.SetSize(msg.Width, msg.Height)
 		h.allowedAccounts.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
@@ -1023,6 +1026,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.snoozeDialog.IsVisible() {
 			h.snoozeDialog.SetAnchor(h.contextMenuAnchor())
+		}
+		if h.tagDialog.IsVisible() {
+			h.tagDialog.SetAnchor(h.contextMenuAnchor())
 		}
 		if h.accountPicker.IsVisible() {
 			h.accountPicker.SetAnchor(h.contextMenuAnchor())
@@ -1321,6 +1327,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case externalRelaunchMsg:
 		return h.handleExternalRelaunches(msg)
 
+	case externalRetagMsg:
+		return h.handleExternalRetags(msg)
+
 	case tccProbeResultMsg:
 		if !msg.determined {
 			// Inconclusive (no server yet / tmux error) — unlatch so a later create
@@ -1457,6 +1466,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		h.applySnoozeUntil(sc, msg.until, msg.durationID)
+		return h, nil
+
+	case tagsSetMsg:
+		// Same discipline as snoozeSelectedMsg: the dialog names one row, and an
+		// async rebuild may have moved the cursor while it was open.
+		if !h.focusContextMenuTarget() {
+			h.setInfo("That session is gone — nothing to tag")
+			return h, nil
+		}
+		h.setTagsSelected(msg.tags)
 		return h, nil
 
 	case accountPickedMsg:
@@ -2566,6 +2585,12 @@ func (h *Home) composeScreen() string {
 		h.recordOverlay(sv, x, y, h.snoozeDialog)
 		base = overlayAt(sv, base, x, y)
 	}
+	// Tag dialog: same row-anchored dropdown treatment.
+	if tv := h.tagDialog.View(); tv != "" {
+		x, y := h.tagDialog.Position(lipgloss.Width(tv), lipgloss.Height(tv))
+		h.recordOverlay(tv, x, y, h.tagDialog)
+		base = overlayAt(tv, base, x, y)
+	}
 	// Contextual tip box — suppressed while a modal owns the screen so a sticky
 	// tip never paints over a dialog.
 	tip := ""
@@ -2676,6 +2701,7 @@ func (h *Home) modalOpen() bool {
 		h.commandPalette.IsVisible() ||
 		h.contextMenu.IsVisible() ||
 		h.snoozeDialog.IsVisible() ||
+		h.tagDialog.IsVisible() ||
 		h.accountPicker.IsVisible() ||
 		h.allowedAccounts.IsVisible() ||
 		h.frost != nil ||
@@ -3080,6 +3106,12 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		dialog, cmd := h.snoozeDialog.Update(msg)
 		h.snoozeDialog = dialog
 		return cmd, true
+	case h.tagDialog.IsVisible():
+		// The raw key, not cmdMsg: the dialog owns text inputs, and a
+		// non-Latin layout must type its own script into them.
+		dialog, cmd := h.tagDialog.Update(msg)
+		h.tagDialog = dialog
+		return cmd, true
 	case h.contextMenu.IsVisible():
 		dialog, cmd := h.contextMenu.Update(cmdMsg)
 		h.contextMenu = dialog
@@ -3412,6 +3444,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, h.forkSelected()
 	case "F":
 		return h, h.forkToWorktreeSelected()
+	case "T":
+		return h.dispatchCommand("set_tags")
 	case "z":
 		// Scope follows the cursor, like `d`. On an already-snoozed row this
 		// wakes immediately rather than re-opening the picker — the common
@@ -5590,6 +5624,8 @@ func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
 	}
 	h.lastAdoptSweepAt = time.Now()
 
+	// Before LoadSessions — see snapshotTags for why the order matters.
+	memTags := snapshotTags(known)
 	rows, err := h.storage.LoadSessions()
 	if err != nil {
 		debuglog.Logger.Error("adopt sweep: failed to load sessions", "err", err)
@@ -5598,6 +5634,7 @@ func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
 	h.adoptExternalSessions(rows, known)
 	h.sendExternalRemovals(rows, known)
 	h.sendExternalRelaunches(rows, known)
+	h.sendExternalRetags(rows, memTags)
 }
 
 // sendExternalRelaunches reports sessions another process relaunched or
@@ -9506,6 +9543,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		{ID: "restart", Label: "Restart", Shortcut: "r", Key: "r", Enabled: true},
 		moveAccount,
 		{ID: "rename", Label: "Rename", Shortcut: "R", Key: "R", Enabled: true},
+		{ID: "set_tags", Label: "Set Role & Task…", Shortcut: "T", Key: "T", Enabled: true},
 		unread,
 		{ID: "editor", Label: "Open in Editor", Shortcut: "e", Key: "e", Enabled: true},
 		{
@@ -9703,6 +9741,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "suspend_now", Name: "Suspend Idle Sessions Now"},
 		{Kind: PaletteKindCommand, ID: "mark_all_read", Name: "Mark All as Read"},
 		{Kind: PaletteKindCommand, ID: "mark_unread", Name: "Mark as Unread", Shortcut: "m"},
+		{Kind: PaletteKindCommand, ID: "set_tags", Name: "Set Role & Task", Haystack: "Set Role & Task team tag orchestrator concierge worker specialty", Shortcut: "T"},
 		{Kind: PaletteKindCommand, ID: "snooze", Name: "Snooze (Session / Repo / Worktree)", Shortcut: "z"},
 		{Kind: PaletteKindCommand, ID: "unsnooze", Name: "Wake Now (Clear Snooze)", Shortcut: "z"},
 		{Kind: PaletteKindCommand, ID: "expand_all", Name: "Expand All Repos"},
@@ -9951,6 +9990,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.confirmRestartSelected()
 	case "move_account":
 		h.openAccountPicker()
+		return h, nil
+	case "set_tags":
+		h.openTagDialog()
 		return h, nil
 	case "allowed_accounts":
 		h.openAllowedAccounts()
