@@ -25,7 +25,17 @@ type SidebarItem struct {
 	IsRepoHeader     bool
 	IsOriginHeader   bool
 	IsCheckoutHeader bool
-	IsSpacer         bool // visual gap row between origin groups; not selectable
+	// IsTaskHeader marks a task group's header in the by-task view. It also sets
+	// IsRepoHeader (the "not a session row" umbrella) but carries no RepoPath or
+	// OriginKey: a task spans repos, so code reading those off a header must
+	// check this first.
+	IsTaskHeader bool
+	IsSpacer     bool // visual gap row between origin groups; not selectable
+
+	// TaskKey names the task on a task header and on each session row under it.
+	// Empty everywhere in the by-repo view, and on the untagged tree below the
+	// tasks — which is what tells the renderer to add a row's repo context.
+	TaskKey string
 
 	OriginKey   string // origin grouping key (github org/repo or local:basename)
 	OriginLabel string // human-readable origin label
@@ -46,6 +56,11 @@ type SidebarItem struct {
 	// Only the group that holds the snooze renders a countdown — a checkout
 	// under a snoozed origin stays silent for the same reason its sessions do.
 	GroupSnooze time.Time
+
+	// taskRepo is the row's checkout info, filled by RenderSidebar for session
+	// rows under a task header only: with no checkout header above them, the
+	// row itself names its repo, branch, dirty marker and PR badge.
+	taskRepo *git.RepoInfo
 }
 
 // RepoGroupInfo holds status counts for a checkout (used by other call sites).
@@ -84,6 +99,29 @@ const originExpandPrefix = "origin:"
 // OriginExpandKey returns the map key used for a given origin.
 func OriginExpandKey(originKey string) string { return originExpandPrefix + originKey }
 
+// taskExpandPrefix namespaces task groups in the same keyspace, so a task's
+// collapse (collapsed_groups) and snooze (snoozed_groups) are stored exactly as
+// an origin's are. Repo paths are absolute, so neither prefix can collide.
+const taskExpandPrefix = "task:"
+
+// TaskExpandKey returns the expand/snooze key for a task group.
+func TaskExpandKey(task string) string { return taskExpandPrefix + task }
+
+// taskRoleRank orders a task's members: the one that directs, the one that
+// talks to you, then the workers, then members with no role.
+func taskRoleRank(r session.Role) int {
+	switch r {
+	case session.RoleOrchestrator:
+		return 0
+	case session.RoleConcierge:
+		return 1
+	case session.RoleWorker:
+		return 2
+	default:
+		return 3
+	}
+}
+
 // labelForOrigin strips the host prefix from an origin key, leaving just the
 // short identifier ("brizzai/fleet" → "fleet", "local:scratch" → "scratch").
 func labelForOrigin(originKey string) string {
@@ -96,7 +134,9 @@ func labelForOrigin(originKey string) string {
 	return originKey
 }
 
-// BuildFlatItems flattens sessions into an origin → checkout → session list.
+// BuildFlatItems flattens sessions into an origin → checkout → session list,
+// or, when SidebarGroupBy is "task", into task groups followed by that same
+// tree over the sessions no task claims.
 //
 // originOf maps each repo root to its origin key. isWorktreeOf reports whether
 // a checkout is a git worktree (so main clones sort before worktrees inside
@@ -122,7 +162,125 @@ func BuildFlatItems(
 	if isWorktreeOf == nil {
 		isWorktreeOf = func(string) bool { return false }
 	}
+	lowerFilter := strings.ToLower(filter)
+	if SidebarGroupBy != "task" {
+		return buildRepoTree(nil, sessions, pending, expanded, lowerFilter, pinnedRepos, failedRemovals, groupSnooze, now, originOf, isWorktreeOf, nil)
+	}
 
+	var untagged []*session.Session
+	tagged := make(map[string]int) // checkout → tagged sessions, for hiding
+	untaggedIn := make(map[string]bool)
+	for _, s := range sessions {
+		repo := session.GetRepoRoot(s.ProjectPath)
+		if s.GetTags().Task != "" {
+			tagged[repo]++
+			continue
+		}
+		untagged = append(untagged, s)
+		untaggedIn[repo] = true
+	}
+	items := buildTaskGroups(sessions, expanded, lowerFilter, groupSnooze, now, originOf)
+
+	// A checkout whose every session sits under a task would otherwise show as a
+	// pinned "(empty)" header — false, and `d` on an empty header unpins at once.
+	// A pinned checkout with no sessions at all, and one holding a "Creating…"
+	// row, still show.
+	hide := make(map[string]bool)
+	for repo := range tagged {
+		if !untaggedIn[repo] {
+			hide[repo] = true
+		}
+	}
+	for _, pw := range pending {
+		delete(hide, pw.RepoPath)
+	}
+	return buildRepoTree(items, untagged, pending, expanded, lowerFilter, pinnedRepos, failedRemovals, groupSnooze, now, originOf, isWorktreeOf, hide)
+}
+
+// buildTaskGroups emits one header per task in use, its members ordered by
+// role (stable within a role, so creation order holds), each carrying its real
+// checkout and origin. A task shows only while one of its members passes the
+// filter.
+func buildTaskGroups(
+	sessions []*session.Session,
+	expanded map[string]bool,
+	lowerFilter string,
+	groupSnooze map[string]time.Time,
+	now time.Time,
+	originOf OriginOf,
+) []SidebarItem {
+	byTask := make(map[string][]*session.Session)
+	for _, s := range sessions {
+		t := s.GetTags().Task
+		if t == "" || (lowerFilter != "" && !sessionMatchesFilter(s, lowerFilter)) {
+			continue
+		}
+		byTask[t] = append(byTask[t], s)
+	}
+	tasks := make([]string, 0, len(byTask))
+	for t := range byTask {
+		tasks = append(tasks, t)
+	}
+	sort.Strings(tasks)
+
+	var items []SidebarItem
+	for _, task := range tasks {
+		members := byTask[task]
+		sort.SliceStable(members, func(i, j int) bool {
+			return taskRoleRank(members[i].GetTags().Role) < taskRoleRank(members[j].GetTags().Role)
+		})
+		counts := make(map[session.Status]int)
+		rows := make([]SidebarItem, len(members))
+		for i, s := range members {
+			repo := session.GetRepoRoot(s.ProjectPath)
+			origin := originOf(repo)
+			if origin == "" {
+				origin = "local:" + filepath.Base(repo)
+			}
+			sn := snoozeState(s, origin, repo, groupSnooze, now)
+			if !sn.Muted {
+				counts[s.GetStatus()]++
+			}
+			rows[i] = SidebarItem{OriginKey: origin, RepoPath: repo, Session: s, TaskKey: task, IsLast: i == len(members)-1, Snooze: sn}
+		}
+
+		if len(items) > 0 && SidebarDensity != "compact" {
+			items = append(items, SidebarItem{IsSpacer: true})
+		}
+		key := TaskExpandKey(task)
+		exp := IsExpanded(expanded, key)
+		items = append(items, SidebarItem{
+			IsRepoHeader: true,
+			IsTaskHeader: true,
+			TaskKey:      task,
+			Expanded:     exp,
+			SessionCount: len(members),
+			StatusCounts: counts,
+			GroupSnooze:  groupSnoozeAt(groupSnooze, key, now),
+		})
+		if exp {
+			items = append(items, rows...)
+		}
+	}
+	return items
+}
+
+// buildRepoTree appends the origin → checkout → session tree to items. hide
+// names checkouts to leave out entirely (by-task view only; nil otherwise).
+func buildRepoTree(
+	items []SidebarItem,
+	sessions []*session.Session,
+	pending []*PendingWorkspace,
+	expanded map[string]bool,
+	lowerFilter string,
+	pinnedRepos map[string]bool,
+	failedRemovals map[string]bool,
+	groupSnooze map[string]time.Time,
+	now time.Time,
+	originOf OriginOf,
+	isWorktreeOf IsWorktreeOf,
+	hide map[string]bool,
+) []SidebarItem {
 	// Collect all checkouts (repo roots) we know about — from sessions,
 	// pending workspaces, and pinned repos.
 	checkouts := make(map[string]struct{})
@@ -134,6 +292,9 @@ func BuildFlatItems(
 	}
 	for repo := range pinnedRepos {
 		checkouts[repo] = struct{}{}
+	}
+	for repo := range hide {
+		delete(checkouts, repo)
 	}
 
 	// Bucket checkouts by origin.
@@ -165,9 +326,6 @@ func BuildFlatItems(
 		}
 		return originKeys[i] < originKeys[j]
 	})
-
-	lowerFilter := strings.ToLower(filter)
-	var items []SidebarItem
 
 	for _, origin := range originKeys {
 		repos := originCheckouts[origin]
@@ -396,6 +554,8 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 		switch {
 		case item.IsSpacer:
 			// Blank line between origin groups.
+		case item.IsTaskHeader:
+			b.WriteString(renderTaskHeader(item, width, i == cursor))
 		case item.IsOriginHeader:
 			b.WriteString(renderOriginHeader(item, width, i == cursor))
 		case item.IsCheckoutHeader:
@@ -408,6 +568,9 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 				if n, ok := slotBySession[item.Session.ID]; ok {
 					slot = n
 				}
+			}
+			if item.TaskKey != "" {
+				item.taskRepo = gitInfo[item.RepoPath]
 			}
 			b.WriteString(renderSessionItem(item, width, i == cursor, slot))
 		}
@@ -548,6 +711,48 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 	}
 	return out + snoozeSuffix
 }
+
+// renderTaskHeader renders a task group's header in the by-task view:
+// "▾ @auth-rework 4  ◐ · ●". It is an origin header with the task as its label
+// (count = members, same pills, same snooze countdown), so the two top-level
+// rows can't drift; the "@" is the same mark `fleet status` and the preview
+// footer put on a task.
+func renderTaskHeader(item SidebarItem, width int, selected bool) string {
+	item.OriginLabel = "@" + item.TaskKey
+	return renderOriginHeader(item, width, selected)
+}
+
+// taskRowContext is what a session row under a task header says about where it
+// runs, since no checkout header sits above it: "fleet/sidebar-by-task", the
+// branch cut like the checkout header cuts it, plus the dirty marker and the PR
+// badge text when those are shown. Before git info lands it is the folder name.
+// Returns the plain text and, separately, the PR for styled rendering.
+func taskRowContext(item SidebarItem) (label, dirty string, pr *github.PR) {
+	info := item.taskRepo
+	if info == nil || info.Branch == "" {
+		return filepath.Base(item.RepoPath), "", nil
+	}
+	branch := info.Branch
+	if idx := strings.LastIndex(branch, "/"); idx != -1 {
+		branch = branch[idx+1:]
+	}
+	label = ansi.Truncate(labelForOrigin(item.OriginKey)+"/"+branch, taskRowContextMax, "…")
+	if ShowDirtyIndicator && info.IsDirty {
+		dirty = "*"
+	}
+	if ShowPRBadges {
+		pr = info.PR
+	}
+	return label, dirty, pr
+}
+
+// taskRowContextMax caps the origin/branch label so a long branch can't eat a
+// narrow sidebar's titles.
+const taskRowContextMax = 24
+
+// minTaskRowTitle is the title width the context suffix may not squeeze below:
+// past it the suffix drops its PR badge, then itself.
+const minTaskRowTitle = 12
 
 // renderGroupSnooze renders a header's snooze countdown, or "" when the group
 // isn't snoozed. Shared by both header kinds so they can't drift.
@@ -730,6 +935,25 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	// The role glyph and specialty come out of the title's budget like the slot
 	// badge — present on only some rows. Measured in cells: both are multi-byte.
 	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost - ansi.StringWidth(roleSel) - ansi.StringWidth(specRaw)
+
+	// Under a task header the row names its own checkout. It gives way to the
+	// title: the PR badge goes first, then the whole suffix.
+	ctxRaw, ctxDirty, prRaw := "", "", ""
+	var ctxPR *github.PR
+	if item.TaskKey != "" {
+		label, dirty, pr := taskRowContext(item)
+		ctxRaw, ctxDirty = "  "+label, dirty
+		if t := prBadgeText(pr); pr != nil && t != "" {
+			prRaw, ctxPR = " "+t, pr
+		}
+		if maxTitleLen-ansi.StringWidth(ctxRaw+ctxDirty+prRaw) < minTaskRowTitle {
+			prRaw, ctxPR = "", nil
+		}
+		if maxTitleLen-ansi.StringWidth(ctxRaw+ctxDirty) < minTaskRowTitle {
+			ctxRaw, ctxDirty = "", ""
+		}
+		maxTitleLen -= ansi.StringWidth(ctxRaw + ctxDirty + prRaw)
+	}
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
@@ -749,7 +973,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	// glyph used for collapsed headers). Bg fill spans symbol + agent glyph +
 	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
-		row := " " + symbolRaw + " " + glyphSel + roleSel + title + specRaw + slotRaw + " "
+		row := " " + symbolRaw + " " + glyphSel + roleSel + title + specRaw + ctxRaw + ctxDirty + prRaw + slotRaw + " "
 		rendered := fmt.Sprintf("   %s", selTitle().Render(row))
 		// On the focused row, spell out the affordance. Exactly one note fits
 		// before the row overflows, so these are mutually exclusive: suspended
@@ -762,6 +986,9 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 		case item.Snooze.Muted && item.Snooze.OwnTimer:
 			rendered += "  " + DimStyle.Render(fmt.Sprintf("%s snoozed %s · z to wake",
 				SnoozeGlyph, formatSnoozeRemaining(item.Snooze.Until, time.Now())))
+		case item.Snooze.Muted && item.Snooze.ByTask != "" && item.TaskKey == "":
+			// Repo view: no task header on screen holds the clock or the wake.
+			rendered += "  " + DimStyle.Render(SnoozeGlyph+" @"+item.Snooze.ByTask+" snoozed")
 		case item.Snooze.Muted:
 			rendered += "  " + DimStyle.Render(SnoozeGlyph+" sleeping · group snoozed")
 		}
@@ -794,6 +1021,15 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	styledSpec := ""
 	if specRaw != "" {
 		styledSpec = DimStyle.Render(specRaw)
+	}
+	if ctxRaw != "" {
+		styledSpec += DimStyle.Render(ctxRaw)
+		if ctxDirty != "" {
+			styledSpec += DirtyStyle.Render(ctxDirty)
+		}
+		if ctxPR != nil {
+			styledSpec += " " + renderPRBadge(ctxPR, false)
+		}
 	}
 	if glyphRaw != "" {
 		styledGlyph := AgentGlyphStyle.Render(glyphRaw)
@@ -1060,7 +1296,9 @@ func NextHeaderItem(items []SidebarItem, current, direction int) int {
 // silently did nothing would be worse than one that lands somewhere useful.
 func NextOriginItem(items []SidebarItem, current, direction int) int {
 	return nextRowMatching(items, current, direction, func(it SidebarItem) bool {
-		return it.IsOriginHeader
+		// A task header is top-level too, so the by-task view's tasks are one
+		// press apart exactly as origins are.
+		return it.IsOriginHeader || it.IsTaskHeader
 	})
 }
 

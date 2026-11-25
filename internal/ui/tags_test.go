@@ -20,7 +20,11 @@ func tagsHome(t *testing.T, sessions ...*session.Session) *Home {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { storage.Close() })
+	// NewHome syncs the display globals from its (empty) config; keep the view a
+	// test picked with byTask.
+	groupBy := SidebarGroupBy
 	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
+	SidebarGroupBy = groupBy
 	h.width, h.height = 120, 40
 	for _, s := range sessions {
 		if err := storage.SaveSession(s.ToRow()); err != nil {

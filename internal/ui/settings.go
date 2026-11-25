@@ -31,6 +31,7 @@ var (
 	statusStyleSet       = []string{"icon", "bar"}
 	chevronStyleSet      = []string{"triangle", "plusminus"}
 	densitySet           = []string{"normal", "compact"}
+	groupBySet           = []string{"repo", "task"}
 	enterModeSet         = []string{"attach", "split"}
 	accountStrategySet   = claudeaccount.Strategies
 	telemetryModeSet     = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
@@ -616,6 +617,19 @@ func buildSettingsCategories() []settingsCategory {
 				valueW: func() int { return maxStrW(chevronStyleSet) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.ChevronStyle = cycleString(d.cfg.GetChevronStyle(), chevronStyleSet, dir)
+					ApplyDisplayConfig(d.cfg)
+				},
+			},
+			{
+				label:  "Group by",
+				value:  func(c *config.Config) string { return c.GetSidebarGroupBy() },
+				valueW: func() int { return maxStrW(groupBySet) },
+				cycle: func(d *SettingsDialog, dir int) {
+					v := cycleString(d.cfg.GetSidebarGroupBy(), groupBySet, dir)
+					if v == "repo" {
+						v = "" // the default, so config.json stays as it was
+					}
+					d.cfg.SidebarGroupBy = v
 					ApplyDisplayConfig(d.cfg)
 				},
 			},

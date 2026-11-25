@@ -21,8 +21,8 @@ var allKeyBindings = []KeyBinding{
 	{Key: "k / ↑", Desc: "Move up", Section: "nav"},
 	{Key: "Shift+↑/↓", Desc: "Jump to previous / next group header", Section: "nav"},
 	{Key: "Ctrl+Shift+↑/↓", Desc: "Jump to previous / next origin", Section: "nav"},
-	{Key: "PgDn", Desc: "Page down", Section: "nav"},
-	{Key: "PgUp", Desc: "Page up", Section: "nav"},
+	{Key: "PgUp / PgDn", Desc: "Page up / down", Section: "nav"},
+	{Key: "g", Desc: "Group sidebar by repo / task", Section: "nav"},
 
 	// Session actions.
 	{Key: ".", BarKey: ".", BarDesc: "Menu", Desc: "Context menu for the selected row", Section: "session"},
@@ -100,6 +100,7 @@ const (
 	BarContextOrigin                     // cursor on an origin header (▾ brizzai 16)
 	BarContextCheckout                   // cursor on a checkout header (▾ new-ui #100)
 	BarContextSession                    // cursor on a real session row
+	BarContextTask                       // cursor on a task header (▾ @auth-rework 4), by-task view
 )
 
 // HelpBarBindings returns ALL bar bindings; kept for places that want the
@@ -153,6 +154,10 @@ func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []str
 	case BarContextOrigin:
 		context = []struct{ Key, Desc string }{
 			{"⏎", "Expand"}, {"d", "Forget"}, {"w", "Wktree"}, {".", "Menu"},
+		}
+	case BarContextTask:
+		context = []struct{ Key, Desc string }{
+			{"⏎", "Expand"}, {"d", "Del"}, {"w", "Wktree"}, {"z", "Snooze"}, {".", "Menu"},
 		}
 	default: // empty
 		context = []struct{ Key, Desc string }{

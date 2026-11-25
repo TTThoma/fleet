@@ -307,7 +307,9 @@ type Home struct {
 	allowedAccounts       *AllowedAccountsDialog
 	// The row the open context menu was built for. Its entries resolve their
 	// subject from h.cursor, which an async rebuild can move — see contextMenuTarget.
-	contextMenuTarget   contextMenuTarget
+	contextMenuTarget contextMenuTarget
+	// settingsCursor is the cursor's row when Settings opened, restored on close.
+	settingsCursor      contextMenuTarget
 	sessionCreateDialog *SessionCreateDialog
 	consentDialog       *ConsentDialog
 	onboardingDialog    *OnboardingDialog
@@ -1382,6 +1384,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.recordStats(stats.ActionDelete)
 		return h.deferDeleteOrigin(msg)
 
+	case taskDeleteMsg:
+		h.recordStats(stats.ActionDelete)
+		return h.deferDeleteTask(msg)
+
+	case taskRepoPickedMsg:
+		return h.handleTaskRepoPicked(msg)
+
 	case pendingDeleteExpireMsg:
 		return h.handlePendingDeleteExpire(msg)
 
@@ -1588,9 +1597,14 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Worktree placement is package state read at provider resolution, so a
 		// change applies to the next worktree without a relaunch.
 		workspace.SetGlobalWorktreePath(h.cfg.WorktreePath)
-		// Display toggles are live, but the density flag changes BuildFlatItems
-		// output (inter-group spacer rows), so rebuild the flattened list.
-		h.rebuildFlatItems()
+		// Display toggles are live, but the density and group-by flags change
+		// BuildFlatItems output, so rebuild the flattened list — keeping the
+		// cursor on its row, since regrouping moves every row.
+		//
+		// The row is the one under the cursor when Settings OPENED: the Group by
+		// cycler flips the view live, and a tick rebuild while the dialog is up
+		// would leave the cursor's index pointing into the other view.
+		h.restoreCursorTo(h.settingsCursor)
 		return h, nil
 
 	case onboardingClosedMsg:
@@ -3438,21 +3452,16 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.newDialog.Show()
 		return h, nil
 	case "w":
-		// New worktree session (works on a session, checkout header, or origin header).
-		repoPath := h.resolveWorktreeBaseRepo()
-		if repoPath == "" {
-			h.setInfo("no repo selected")
-			return h, nil
-		}
-		h.worktreeDialog.SetInherit(h.worktreeInheritTags())
-		h.worktreeDialog.ShowLoading()
-		return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
+		// New worktree session (works on a session, checkout, origin or task header).
+		return h, h.openWorktreeAtCursor()
 	case "f":
 		return h, h.forkSelected()
 	case "F":
 		return h, h.forkToWorktreeSelected()
 	case "T":
 		return h.dispatchCommand("set_tags")
+	case "g":
+		return h.dispatchCommand("toggle_group_by")
 	case "z":
 		// Scope follows the cursor, like `d`. On an already-snoozed row this
 		// wakes immediately rather than re-opening the picker — the common
@@ -3604,6 +3613,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		analytics.Track(analytics.EventCommandPalette, nil)
 		return h, h.maybeLoadPaletteTickets()
 	case "S":
+		h.settingsCursor = h.targetForCursor() // see settingsClosedMsg
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil
@@ -4525,6 +4535,11 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 	// Ensure the repo group is expanded for the new session and pin it.
 	repo := session.GetRepoRoot(s.ProjectPath)
 	h.setExpanded(repo, true)
+	// Its task too, which is where the by-task view draws it — the user just
+	// asked for this session, so landing on it beats keeping the fold.
+	if t := s.GetTags().Task; t != "" {
+		h.setExpanded(TaskExpandKey(t), true)
+	}
 	if !h.pinnedRepos[repo] {
 		h.pinnedRepos[repo] = true
 		if err := h.storage.PinRepo(repo); err != nil {
@@ -4766,6 +4781,9 @@ func (h *Home) canAutoExpand(repo string) bool {
 func (h *Home) deleteAtCursor() tea.Cmd {
 	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
 		item := h.flatItems[h.cursor]
+		if item.IsTaskHeader {
+			return h.confirmDeleteTask(item)
+		}
 		if item.IsOriginHeader {
 			return h.confirmDeleteOrigin(item)
 		}
@@ -6165,6 +6183,10 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 // Empty when the cursor isn't on a header.
 func (h *Home) expandKeyFor(item SidebarItem) string {
 	switch {
+	case item.TaskKey != "":
+		// A task header, or a member row under one — so `←` on a member folds
+		// its task, as it folds its checkout in the repo tree.
+		return TaskExpandKey(item.TaskKey)
 	case item.IsOriginHeader:
 		return OriginExpandKey(item.OriginKey)
 	case item.IsCheckoutHeader:
@@ -6274,15 +6296,21 @@ func (h *Home) toggleRepoGroup() {
 		return
 	}
 	item := h.flatItems[h.cursor]
-	if !item.IsOriginHeader && !item.IsCheckoutHeader {
+	if !item.IsOriginHeader && !item.IsCheckoutHeader && !item.IsTaskHeader {
 		return
 	}
 	key := h.expandKeyFor(item)
 	if key == "" {
 		return
 	}
+	target := h.targetForCursor()
 	h.setExpanded(key, !IsExpanded(h.repoExpanded, key))
 	h.rebuildFlatItems()
+	if idx := target.find(h.flatItems); idx >= 0 {
+		h.cursor = idx
+		h.syncViewport()
+		return
+	}
 	// Keep cursor on the same header.
 	for i, it := range h.flatItems {
 		if (it.IsOriginHeader && it.OriginKey == item.OriginKey && item.IsOriginHeader) ||
@@ -6320,6 +6348,13 @@ func (h *Home) collapseRepoAtCursor() {
 	h.rebuildFlatItems()
 	// Move cursor to the matching header row.
 	for i, fi := range h.flatItems {
+		if item.TaskKey != "" {
+			if fi.IsTaskHeader && fi.TaskKey == item.TaskKey {
+				h.cursor = i
+				break
+			}
+			continue
+		}
 		if item.IsOriginHeader && fi.IsOriginHeader && fi.OriginKey == item.OriginKey {
 			h.cursor = i
 			break
@@ -6391,6 +6426,8 @@ func (h *Home) jumpToNextAttentionSession() {
 			switch {
 			case cur.Session != nil && it.Session != nil && it.Session.ID == cur.Session.ID:
 				start = i
+			case cur.IsTaskHeader && it.IsTaskHeader && it.TaskKey == cur.TaskKey:
+				start = i
 			case cur.IsOriginHeader && it.IsOriginHeader && it.OriginKey == cur.OriginKey:
 				start = i
 			case cur.IsCheckoutHeader && it.IsCheckoutHeader && it.RepoPath == cur.RepoPath:
@@ -6449,8 +6486,10 @@ func (h *Home) jumpToNextAttentionSession() {
 func (h *Home) buildJumpTree() []SidebarItem {
 	exp := make(map[string]bool, len(h.repoExpanded))
 	for k, v := range h.repoExpanded {
-		if strings.HasPrefix(k, originExpandPrefix) {
-			exp[k] = v // keep origin collapse; drop checkout keys → default expanded
+		if strings.HasPrefix(k, originExpandPrefix) || strings.HasPrefix(k, taskExpandPrefix) {
+			// Keep origin and task collapse — both are top-level, and a folded
+			// top-level group is muted; drop checkout keys → default expanded.
+			exp[k] = v
 		}
 	}
 	originOf, isWorktreeOf := h.originResolvers()
@@ -6491,10 +6530,20 @@ func (h *Home) jumpToNextAttentionPR() {
 		for off := 1; off <= n; off++ {
 			i := (h.cursor + off + n) % n // +n keeps the index non-negative for a stale cursor
 			it := h.flatItems[i]
-			if !it.IsCheckoutHeader {
-				continue
-			}
-			if snoozeState(nil, it.OriginKey, it.RepoPath, h.groupSnooze, now).Muted {
+			switch {
+			case it.IsCheckoutHeader:
+				if snoozeState(nil, it.OriginKey, it.RepoPath, h.groupSnooze, now).Muted {
+					continue
+				}
+			case it.TaskKey != "" && it.Session != nil:
+				// By-task view: a member row carries its checkout's badge, so it
+				// is a candidate in place of the header that isn't drawn. Only
+				// the first unmuted row of a run sharing a checkout, so one press
+				// is one PR — and a muted first member doesn't hide the rest.
+				if it.Snooze.Muted || h.earlierInCheckoutRun(i) {
+					continue
+				}
+			default:
 				continue
 			}
 			info := gitInfo[it.RepoPath]
@@ -6514,7 +6563,7 @@ func (h *Home) jumpToNextAttentionPR() {
 		return // Silent no-op.
 	}
 	h.cursor = target
-	if hdr := h.flatItems[target]; hdr.SessionCount > 0 {
+	if hdr := h.flatItems[target]; hdr.IsCheckoutHeader && hdr.SessionCount > 0 {
 		h.repoExpanded[hdr.RepoPath] = true
 		h.rebuildFlatItems()
 		for i, it := range h.flatItems {
@@ -6876,8 +6925,11 @@ func (h *Home) undoDelete() (tea.Model, tea.Cmd) {
 	h.rebuildSessionMap()
 	h.workerMu.Unlock()
 
-	// Expand repo group and rebuild sidebar.
+	// Expand repo group (and task) and rebuild sidebar.
 	h.repoExpanded[pd.RepoPath] = true
+	if t := pd.Session.GetTags().Task; t != "" {
+		h.repoExpanded[TaskExpandKey(t)] = true
+	}
 	h.rebuildFlatItems()
 
 	// Move cursor to restored session.
@@ -7245,10 +7297,15 @@ func (h *Home) allExpandKeys() []string {
 		return "local:" + filepath.Base(repo)
 	}
 
+	taskSeen := make(map[string]bool)
 	for _, s := range h.sessions {
 		repo := session.GetRepoRoot(s.ProjectPath)
 		addCheckout(repo)
 		addOrigin(originFor(repo))
+		if t := s.GetTags().Task; t != "" && !taskSeen[t] {
+			taskSeen[t] = true
+			keys = append(keys, TaskExpandKey(t))
+		}
 	}
 	for repo := range h.pinnedRepos {
 		addCheckout(repo)
@@ -8652,6 +8709,8 @@ func (h *Home) cursorBarContext() BarContext {
 	}
 	item := h.flatItems[h.cursor]
 	switch {
+	case item.IsTaskHeader:
+		return BarContextTask
 	case item.IsOriginHeader:
 		return BarContextOrigin
 	case item.IsCheckoutHeader:
@@ -8679,6 +8738,11 @@ func (h *Home) cursorBreadcrumb(bg color.Color) string {
 	sep := dimSeg.Render(" › ")
 
 	var parts []string
+	if item.TaskKey != "" {
+		// By-task view: the task is the top of the path, as the origin is in
+		// the repo tree. A member row still names its origin and branch next.
+		parts = append(parts, segStyle.Render("@"+item.TaskKey))
+	}
 	if item.OriginKey != "" {
 		// Show the full origin (e.g. "brizzai/fleet") so the breadcrumb
 		// names both the owner AND the repo, not just the repo. Local
@@ -8876,9 +8940,8 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 	// collapsed, so a bound session folded away under either header still
 	// becomes visible and selectable. (Expanding only the checkout left a
 	// collapsed origin hiding the row — it then read as "hidden by filter".)
-	repo := session.GetRepoRoot(s.ProjectPath)
 	moved := h.targetForCursor() != contextMenuTarget{sessionID: sessID} // before the rebuild shifts rows
-	h.revealCheckout(repo)
+	h.revealSession(s)
 	h.rebuildFlatItems()
 
 	idx := -1
@@ -9041,6 +9104,33 @@ func originOfIn(m map[string]*git.RepoInfo, repoRoot string) string {
 func (h *Home) revealCheckout(repo string) {
 	h.repoExpanded[OriginExpandKey(h.originOf(repo))] = true
 	h.repoExpanded[repo] = true
+}
+
+// earlierInCheckoutRun reports whether a row above i, in the unbroken run of
+// session rows sharing i's checkout, is unmuted — i.e. already the P-jump's
+// candidate for that checkout.
+func (h *Home) earlierInCheckoutRun(i int) bool {
+	repo := h.flatItems[i].RepoPath
+	for j := i - 1; j >= 0; j-- {
+		prev := h.flatItems[j]
+		if prev.Session == nil || prev.RepoPath != repo {
+			return false
+		}
+		if !prev.Snooze.Muted {
+			return true
+		}
+	}
+	return false
+}
+
+// revealSession expands every group that could hide s: its origin and
+// checkout, and its task, which is where the by-task view draws it.
+// Transient, like revealCheckout (the map, not the stored collapse).
+func (h *Home) revealSession(s *session.Session) {
+	h.revealCheckout(session.GetRepoRoot(s.ProjectPath))
+	if t := s.GetTags().Task; t != "" {
+		h.repoExpanded[TaskExpandKey(t)] = true
+	}
 }
 
 func (h *Home) removePendingWorkspace(id string) {
@@ -9360,6 +9450,7 @@ type contextMenuTarget struct {
 	sessionID string // session rows
 	repoPath  string // checkout headers
 	originKey string // origin headers
+	taskKey   string // task headers (by-task view)
 	// pendingID identifies a "Creating…" phantom row. The context menu never
 	// sets it — a phantom has no actions — but cursor preservation needs it:
 	// handleWorkspaceCreate auto-selects the phantom, so without this case the
@@ -9384,6 +9475,10 @@ func (t contextMenuTarget) find(items []SidebarItem) int {
 			if item.IsOriginHeader && item.OriginKey == t.originKey {
 				return i
 			}
+		case t.taskKey != "":
+			if item.IsTaskHeader && item.TaskKey == t.taskKey {
+				return i
+			}
 		case t.pendingID != "":
 			if item.Pending != nil && item.Pending.ID == t.pendingID {
 				return i
@@ -9400,6 +9495,8 @@ func (h *Home) targetForCursor() contextMenuTarget {
 	}
 	item := h.flatItems[h.cursor]
 	switch {
+	case item.IsTaskHeader:
+		return contextMenuTarget{taskKey: item.TaskKey}
 	case item.IsOriginHeader:
 		return contextMenuTarget{originKey: item.OriginKey}
 	case item.IsCheckoutHeader:
@@ -9444,6 +9541,8 @@ func (h *Home) buildContextMenuItems() (string, []ContextMenuItem) {
 		return h.checkoutContextMenu()
 	case BarContextOrigin:
 		return h.originContextMenu()
+	case BarContextTask:
+		return h.taskContextMenu()
 	default:
 		return "", nil
 	}
@@ -9768,6 +9867,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "set_tags", Name: "Set Role & Task", Haystack: "Set Role & Task team tag orchestrator concierge worker specialty", Shortcut: "T"},
 		{Kind: PaletteKindCommand, ID: "snooze", Name: "Snooze (Session / Repo / Worktree)", Shortcut: "z"},
 		{Kind: PaletteKindCommand, ID: "unsnooze", Name: "Wake Now (Clear Snooze)", Shortcut: "z"},
+		{Kind: PaletteKindCommand, ID: "toggle_group_by", Name: h.groupByCommandName(), Haystack: h.groupByCommandName() + " group sidebar view team tags", Shortcut: "g"},
 		{Kind: PaletteKindCommand, ID: "expand_all", Name: "Expand All Repos"},
 		{Kind: PaletteKindCommand, ID: "collapse_all", Name: "Collapse All Repos"},
 		{Kind: PaletteKindCommand, ID: "quit", Name: "Quit", Shortcut: "⌃C"},
@@ -9875,12 +9975,16 @@ func (h *Home) jumpToRepoHeader(repoPath string) (tea.Model, tea.Cmd) {
 	h.rebuildFlatItems()
 	idx := -1
 	for i, item := range h.flatItems {
-		if item.IsRepoHeader && item.RepoPath == repoPath {
+		if item.IsCheckoutHeader && item.RepoPath == repoPath {
 			idx = i
 			break
 		}
 	}
 	if idx < 0 {
+		if SidebarGroupBy == "task" && h.filterText == "" {
+			h.setInfo("Its sessions are grouped under tasks — g groups by repo")
+			return h, nil
+		}
 		h.setInfo("Repo hidden by filter")
 		return h, nil
 	}
@@ -9983,14 +10087,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.newDialog.Show()
 		return h, nil
 	case "new_worktree":
-		repoPath := h.resolveWorktreeBaseRepo()
-		if repoPath == "" {
-			h.setInfo("no repo selected")
-			return h, nil
-		}
-		h.worktreeDialog.SetInherit(h.worktreeInheritTags())
-		h.worktreeDialog.ShowLoading()
-		return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
+		return h, h.openWorktreeAtCursor()
 	case "fork":
 		return h, h.forkSelected()
 	case "fork_worktree":
@@ -10018,6 +10115,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "set_tags":
 		h.openTagDialog()
+		return h, nil
+	case "toggle_group_by":
+		h.toggleSidebarGroupBy()
 		return h, nil
 	case "allowed_accounts":
 		h.openAllowedAccounts()
@@ -10061,6 +10161,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		analytics.Track(analytics.EventFilterUsed, nil)
 		return h, nil
 	case "settings":
+		h.settingsCursor = h.targetForCursor() // see settingsClosedMsg
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil
@@ -10101,9 +10202,10 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "collapse_all":
 		// Snapshot the repo under the cursor so we can land on its
 		// header after the rebuild hides everything else.
-		var snapRepo string
+		var snapRepo, snapTask string
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
 			snapRepo = h.flatItems[h.cursor].RepoPath
+			snapTask = h.flatItems[h.cursor].TaskKey
 		}
 		// Force-write every origin + checkout key to false. We can't
 		// rely on iterating h.repoExpanded — IsExpanded defaults missing
@@ -10114,7 +10216,14 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		h.cursor = 0
 		for i, item := range h.flatItems {
-			if item.IsRepoHeader && item.RepoPath == snapRepo {
+			if snapTask != "" {
+				if item.IsTaskHeader && item.TaskKey == snapTask {
+					h.cursor = i
+					break
+				}
+				continue
+			}
+			if item.IsRepoHeader && !item.IsTaskHeader && item.RepoPath == snapRepo {
 				h.cursor = i
 				break
 			}
